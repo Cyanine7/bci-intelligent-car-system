@@ -42,6 +42,8 @@ class HostController(QObject):
     changed = Signal()
     log_added = Signal(object)
     logs_cleared = Signal()
+    sample_received = Signal(object)
+    request_updated = Signal(object)
 
     def __init__(self, data_directory: Path, parent=None, worker_factory=create_worker,
                  scanner_factory=None):
@@ -65,6 +67,11 @@ class HostController(QObject):
         self.actual_parameters = None
         self.parameter_status = "尚未读取实际 RAM 参数"
         self.command_results: dict[str, DeviceResult] = {}
+        self.command_metadata: dict[str, dict] = {}
+        self.control_owner: str | None = None
+        self.automation_service = None
+        self.caps_received_utc = None
+        self.parameters_received_utc = None
         self._project_pending = {}
         self._motion_latched_seq = 0
         self._state_required_seq = 0
@@ -104,6 +111,9 @@ class HostController(QObject):
         self.log_added.emit(entry)
 
     def connect_device(self, config: ConnectionConfig) -> bool:
+        if self.control_owner:
+            self.add_log("实验阶段占用控制权；请先停止阶段", "WARNING")
+            return False
         if self._shutting_down:
             return False
         if self.worker is not None:
@@ -138,6 +148,9 @@ class HostController(QObject):
         except Exception as exc:
             self.add_log(f"通信组件创建失败：{exc}", "ERROR")
             return False
+        if getattr(worker, "source", source) == "SIMULATION_PROJECT_V1":
+            source = "SIMULATION_PROJECT_V1"
+            adapter = create_protocol_adapter(config.protocol, source)
         self.source = source
         self.adapter = adapter
         self.capabilities = capabilities
@@ -146,6 +159,8 @@ class HostController(QObject):
         self.actual_parameters = None
         self.parameter_status = "尚未读取实际 RAM 参数"
         self.command_results.clear()
+        self.command_metadata.clear()
+        self.caps_received_utc = self.parameters_received_utc = None
         self._project_pending.clear()
         self._motion_latched_seq = self._state_required_seq = 0
         self._device_dropped = (0, 0)
@@ -173,6 +188,8 @@ class HostController(QObject):
         return True
 
     def disconnect_device(self) -> None:
+        if self.automation_service is not None and self.automation_service.active:
+            self.automation_service.stop("连接被主动断开")
         self._pending_connection = None
         if self.worker is not None:
             self.connection_status = "正在断开"
@@ -203,8 +220,12 @@ class HostController(QObject):
                      direction="QUEUED", request_id=request_id)
         return True
 
-    def send_command(self, command: str, values=None) -> DeviceResult:
+    def send_command(self, command: str, values=None, *, owner=None) -> DeviceResult:
         """Semantic commands are encoded by a selected protocol, not by UI/link code."""
+        if self.control_owner and owner != self.control_owner:
+            if command == "stop" and self.automation_service is not None:
+                return self.automation_service.stop("人工 STOP")
+            return DeviceResult(False, "busy", "自动化阶段正在运行；请先停止阶段后再手动操作")
         if isinstance(self.adapter, ProjectV1Adapter):
             return self._send_project_command(command, values)
         encoder = getattr(self.adapter, "encode_command", None)
@@ -255,12 +276,17 @@ class HostController(QObject):
         self.command_results[result.request_id] = result
         while len(self.command_results) > 128:
             del self.command_results[next(iter(self.command_results))]
+        self.request_updated.emit(result)
 
     def _queue_project(self, command, payload):
         request_id = uuid4().hex
         if not self.worker.request_send(payload, request_id=request_id):
             return DeviceResult(False, "rejected", "发送队列已满或连接正在关闭")
         seq = self.adapter.seq
+        self.command_metadata[request_id] = dict(command=command, seq=seq,
+                                                session=self.adapter.session)
+        while len(self.command_metadata) > 128:
+            del self.command_metadata[next(iter(self.command_metadata))]
         self._project_pending[seq] = {"command": command, "request_id": request_id,
                                       "due": time.monotonic() + 2.0,
                                       "ack": False, "reply": False}
@@ -361,6 +387,7 @@ class HostController(QObject):
                     continue
                 self.project_limits = dict(pwm_limit=pwm, speed_limit_mm_s=speed,
                     max_duration_ms=duration, control_hz=hz, state_hz=state_hz, car_mode=mode)
+                self.caps_received_utc = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
                 self.capabilities = DeviceCapabilities(protocol=PROJECT_V1, telemetry=bool(features & 1),
                     parameter_read=bool(features & 2), parameter_write=bool(features & 2),
                     open_loop=bool(features & 4), motion=bool(features & 8),
@@ -404,6 +431,7 @@ class HostController(QObject):
                     self.add_log("忽略 revision 倒退的 PARAMS；未覆盖较新的实际 RAM 值", "WARNING")
                     continue
                 self.actual_parameters = dict(zip(PARAMETER_KEYS, coefficients), revision=revision)
+                self.parameters_received_utc = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
                 pending["reply"] = True
                 self.parameter_status = "实际 RAM 值已回读；等待 ACK" if not pending["ack"] else "实际 RAM 值已回读确认（不写 Flash）"
             needs_reply = command in ("hello", "read_parameters", "apply_parameters")
@@ -546,12 +574,14 @@ class HostController(QObject):
                     was_connected = self.connected
                     self.connected = True
                     self.connection_status = {"SIMULATOR": "模拟设备已连接", "SERIAL": "串口已打开",
+                                              "SIMULATION_PROJECT_V1": "PROJECT_V1 假设备已连接（纯软件）",
                                               "BLUETOOTH_SPP": "蓝牙SPP已连接"}[self.source]
                     self.add_log(event.message or self.connection_status)
                     if isinstance(self.adapter, ProjectV1Adapter) and not was_connected:
                         self._begin_project_session()
                 elif event.kind in ("rx", "tx"):
                     tx_message = {"SIMULATOR": "模拟发送已接受，仅用于通信验证",
+                                  "SIMULATION_PROJECT_V1": "假设备已接收，仅用于 PROJECT_V1 软件验证",
                                   "SERIAL": "已写入串口，未确认MCU执行",
                                   "BLUETOOTH_SPP": "已写入蓝牙连接，未确认MCU执行"}[self.source]
                     self.add_log(tx_message if event.kind == "tx" else "收到原始数据",
@@ -576,6 +606,7 @@ class HostController(QObject):
                             if (self._motion_latched_seq and sample.protocol == PROJECT_V1
                                     and not sample.armed and sample.device_last_seq >= self._motion_latched_seq):
                                 self._motion_latched_seq = 0
+                            self.sample_received.emit(sample)
                         if isinstance(self.adapter, ProjectV1Adapter) and self.connected and not self._closing_connection:
                             self._handle_project_events()
                         for issue in self.adapter.pop_issues():
@@ -625,6 +656,9 @@ class HostController(QObject):
         self.changed.emit()
 
     def start_recording(self) -> bool:
+        if self.control_owner and self.recorder.is_running:
+            self.add_log("自动化阶段正在录制，不能重启录制", "WARNING")
+            return False
         if not self.connected:
             self.add_log("连接设备后才能开始录制", "WARNING")
             return False
@@ -643,7 +677,11 @@ class HostController(QObject):
         self.changed.emit()
         return True
 
-    def stop_recording(self) -> bool:
+    def stop_recording(self, *, owner=None) -> bool:
+        if self.control_owner and owner != self.control_owner:
+            if self.automation_service is not None:
+                self.automation_service.stop("录制被人工停止")
+            return False
         self.add_log("停止录制并保存文件")
         done = self.recorder.stop(timeout=0)
         if getattr(self.recorder, "dropped_total", 0) or getattr(self.recorder, "failure_message", None):
@@ -677,6 +715,8 @@ class HostController(QObject):
 
     def shutdown(self) -> bool:
         # Never wait for a process/thread or disk flush on the GUI thread.
+        if self.automation_service is not None and not self.automation_service.shutdown():
+            return False
         if not self._shutting_down:
             self._shutting_down = True
             self._pending_connection = None

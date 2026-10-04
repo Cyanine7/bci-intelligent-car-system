@@ -81,10 +81,12 @@ class MotionPanel(QDialog):
     def refresh(self):
         host, sample = self.host, self.host.latest
         capability = host.capabilities.open_loop if self.mode == 1 else host.capabilities.motion
-        ready = bool(capability and host.project_state_fresh and sample is not None)
+        ready = bool(capability and host.project_state_fresh and sample is not None and not host.control_owner)
         pending = host.project_control_pending
         self.arm_button.setEnabled(ready and not sample.armed and sample.local_enable and not pending)
-        if not host.connected:
+        if host.control_owner:
+            arm_reason = "自动化阶段正在运行；先停止阶段后再手动操作。"
+        elif not host.connected:
             arm_reason = "尚未连接设备。"
         elif not capability:
             arm_reason = host.capabilities.reason_for("open_loop" if self.mode == 1 else "motion")
@@ -173,7 +175,7 @@ class ParameterPanel(QDialog):
 
     def refresh(self):
         host = self.host
-        pending = host.project_request_pending
+        pending = host.project_request_pending or bool(host.control_owner)
         self.read_button.setEnabled(host.connected and host.capabilities.parameter_read and not pending)
         self.apply_button.setEnabled(host.capabilities.parameter_write and host.project_state_fresh
                                      and not host.latest.armed and not pending)
@@ -185,4 +187,4 @@ class ParameterPanel(QDialog):
             self.actual_label.setText(f"实际 RAM revision={actual['revision']}\n{values}")
         else:
             self.actual_label.setText("实际 RAM：尚未回读；草稿值不代表设备参数")
-        self.status_label.setText(host.parameter_status)
+        self.status_label.setText("自动化阶段占用控制权；参数修改已禁用。" if host.control_owner else host.parameter_status)

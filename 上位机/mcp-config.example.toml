@@ -1,0 +1,6 @@
+# 本机示例；移动工程后同时更新下面三个绝对路径。
+# 可合并到 Codex 的 MCP 配置；不会启动 GUI 或连接设备。
+[mcp_servers.car_debug]
+command = 'D:\Documents\codes\pycodes\脑控小车\上位机\.venv-mcp\Scripts\python.exe'
+args = ['D:\Documents\codes\pycodes\脑控小车\上位机\car_debug_mcp\launch.py', '--project-directory', 'D:\Documents\codes\pycodes\脑控小车\上位机']
+enabled = true

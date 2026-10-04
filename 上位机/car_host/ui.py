@@ -96,6 +96,15 @@ class MainWindow(QMainWindow):
         header.addWidget(self.source_badge)
         layout.addLayout(header)
         layout.addWidget(self._build_connection_bar())
+        if controller.automation_service is not None:
+            bar = QHBoxLayout()
+            self.automation_status_value = QLabel("等待实验表与阶段批准")
+            self.automation_status_value.setWordWrap(True)
+            bar.addWidget(self.automation_status_value, 1)
+            self.automation_view_button = QPushButton("查看实验表与进度")
+            self.automation_view_button.clicked.connect(self._show_automation)
+            bar.addWidget(self.automation_view_button)
+            layout.addLayout(bar)
 
         vertical = QSplitter(Qt.Orientation.Vertical)
         upper = QSplitter(Qt.Orientation.Horizontal)
@@ -724,6 +733,9 @@ class MainWindow(QMainWindow):
 
     def refresh_state(self) -> None:
         host = self.controller
+        if host.automation_service is not None and hasattr(self, "automation_status_value"):
+            from .automation_panel import progress_text
+            self.automation_status_value.setText(progress_text(host.automation_service))
         idle = host.worker is None
         scanning = getattr(host, "bluetooth_scanning", False)
         self.kind_combo.setEnabled(idle and not scanning and not self._closing)
@@ -739,13 +751,14 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(host.connected and host.capabilities.raw_send and not self._closing)
         self.send_button.setToolTip("" if host.capabilities.raw_send else host.capabilities.reason_for("raw_send"))
         saving = host.recorder.is_running and not host.recorder.is_active
-        self.record_button.setEnabled((host.connected or host.recorder.is_running) and not saving and not self._closing)
+        self.record_button.setEnabled((host.connected or host.recorder.is_running) and not saving and not self._closing and not host.control_owner)
         self.record_button.setText("正在保存" if saving else "停止录制" if host.recorder.is_active else "开始录制")
         self.connection_value.setText(host.connection_status)
         self.telemetry_value.setText(host.telemetry_status)
         good = host.telemetry_status == "接收正常"
         self.telemetry_value.setStyleSheet("color: #277b66;" if good else "color: #ad7130;")
-        self.source_badge.setText("模拟数据" if host.source == "SIMULATOR" and host.worker is not None else
+        self.source_badge.setText("PROJECT_V1 假设备 · 纯软件" if host.source == "SIMULATION_PROJECT_V1" else
+                                 "模拟数据" if host.source == "SIMULATOR" and host.worker is not None else
                                  "蓝牙 SPP" if host.source == "BLUETOOTH_SPP" and host.worker is not None else
                                  "真实串口" if host.connected else "未连接")
         self.source_badge.setToolTip("Classic Bluetooth RFCOMM/SPP · 真实无线数据" if host.source == "BLUETOOTH_SPP" else "")
@@ -813,6 +826,16 @@ class MainWindow(QMainWindow):
                 self.left_curve.setData([], [])
                 self.right_curve.setData([], [])
             self._last_plot_update = now
+
+    def _show_automation(self):
+        from .automation_panel import AutomationPanel
+        panel = self._tool_windows.get("automation")
+        if panel is None:
+            panel = AutomationPanel(self.controller.automation_service, self)
+            self._tool_windows["automation"] = panel
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
 
     def closeEvent(self, event) -> None:
         if not self._closing and not self._close_ready:

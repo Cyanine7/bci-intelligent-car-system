@@ -4,4 +4,4 @@ from .runtime import prepare_qt_runtime
 
 prepare_qt_runtime()
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

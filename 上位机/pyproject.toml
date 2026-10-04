@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "car-host-workbench"
-version = "0.4.0"
+version = "0.5.0"
 description = "小车串口与蓝牙SPP通信、监测及可扩展调试工作台"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -20,7 +20,7 @@ dev = ["pytest==9.0.3"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["car_host*"]
+include = ["car_host*", "car_debug_mcp*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

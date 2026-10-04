@@ -1,0 +1,14 @@
+{
+  "plan_id": "7277edec1adc4b5489f9ffc9363d3f3a",
+  "digest": "7ded9f8d4d9bfc8aecedc2a8d4a52932ff8cb48dfeb3ef2add8a4b251fef0e20",
+  "name": "2026-10-04 开环复测 S1b 小幅升档短脉冲 v1",
+  "stages": [{
+    "stage_id": "s1b_forward_probe",
+    "name": "未启动后加50 PWM单轮短脉冲",
+    "trials": [
+      {"trial_id":"s1b_forward_probe-t001","left_pwm":950,"right_pwm":0,"duration_ms":500,"stop_after_ms":null,"label":"S1b-左：950/0，仅一次500ms，观察启动与到期停止"},
+      {"trial_id":"s1b_forward_probe-t002","left_pwm":0,"right_pwm":1350,"duration_ms":500,"stop_after_ms":null,"label":"S1b-右：0/1350，仅一次500ms，观察启动与到期停止"}
+    ]
+  }],
+  "trial_count": 2
+}

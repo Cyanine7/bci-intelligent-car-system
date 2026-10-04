@@ -1,0 +1,16 @@
+{
+  "plan_id": "4656a17ee305416ba92e2d7de1423846",
+  "digest": "a33da92892825063c54f4354ffa9cec43118911ced8e580e6517e958f88aafd0",
+  "name": "2026-10-04 开环复测 S1 正向短脉冲核对 v1",
+  "stages": [
+    {
+      "stage_id": "s1_forward_check",
+      "name": "正向单轮短脉冲与到期停止",
+      "trials": [
+        {"trial_id":"s1_forward_check-t001","left_pwm":900,"right_pwm":0,"duration_ms":500,"stop_after_ms":null,"label":"S1-左：架空正向900，核对持续反馈与到期停止"},
+        {"trial_id":"s1_forward_check-t002","left_pwm":0,"right_pwm":1300,"duration_ms":500,"stop_after_ms":null,"label":"S1-右：架空正向1300，核对持续反馈与到期停止"}
+      ]
+    }
+  ],
+  "trial_count": 2
+}
