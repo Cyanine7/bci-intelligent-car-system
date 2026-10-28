@@ -248,6 +248,12 @@ def test_virtual_thirty_minutes_record_all_frames_with_bounded_history(host, qap
             host.worker.emit("rx", b"{C7:13:92}$")
             host.worker.events[-1] = replace(host.worker.events[-1], monotonic=now[0])
         host.poll()
+        # Accelerated batches may span several bounded 5ms receive pumps.
+        for _ in range(256):
+            if not host.io_backlog_exceeded:
+                break
+            host.poll()
+        assert not host.io_backlog_exceeded
         assert len(host.history.samples) <= 1201
         assert len(host.logs) <= 1000
         # Drain the finite recorder between accelerated batches instead of

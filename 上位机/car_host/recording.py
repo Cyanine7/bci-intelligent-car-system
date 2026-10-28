@@ -12,7 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .models import TelemetrySample
+from .models import TelemetrySample, EncoderTotals
+
+
+TRACE_SCHEMA_VERSION = 1
+MAX_TRACE_BYTES = 16384
+
+
+@dataclass(frozen=True)
+class _TraceRecord:
+    line: str
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,15 @@ CSV_FIELDS = (
     "encoder_right", "imu_accel", "imu_gyro", "attitude", "connection_id",
     "battery_mv", "control_mode", "armed", "stop_reason", "local_enable",
     "rx_dropped", "tx_dropped", "parameter_revision", "device_last_seq", "device_session",
+    "frame_seq", "profile_seq", "profile_start_tick", "segment1_actual_tick", "segment_index", "profile_status",
+    "rx_first_block_id", "rx_last_block_id", "rx_first_monotonic", "parent_read_monotonic",
+    "worker_enqueued_monotonic", "controller_started_monotonic", "controller_completed_monotonic",
+)
+ENCODER_CSV_FIELDS = (
+    "received_utc", "received_monotonic", "source", "protocol", "connection_id",
+    "device_session", "frame_seq", "epoch_tick", "device_time_ms", "sample_seq",
+    "total_left", "total_right", "interval_ms", "delayed_samples", "initialized",
+    "raw_frame_hex", "rx_first_block_id", "rx_last_block_id",
 )
 
 
@@ -73,6 +91,8 @@ class SessionRecorder:
         self.directory: Path | None = None
         self.sample_count = 0
         self.log_count = 0
+        self.trace_count = 0
+        self.encoder_count = 0
 
     @property
     def is_active(self) -> bool:
@@ -91,12 +111,15 @@ class SessionRecorder:
         csv_file = (directory / "telemetry.csv").open("x", encoding="utf-8-sig", newline="")
         try:
             log_file = (directory / "communication.log").open("x", encoding="utf-8")
+            trace_file = (directory / "receive_trace.jsonl").open("x", encoding="utf-8")
             writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
             writer.writeheader()
         except Exception:
             csv_file.close()
             if "log_file" in locals():
                 log_file.close()
+            if "trace_file" in locals():
+                trace_file.close()
             raise
         self._queue = queue.Queue(maxsize=self._capacity)
         self._stop.clear()
@@ -104,11 +127,12 @@ class SessionRecorder:
         self._dropped = 0
         self.dropped_total = 0
         self.failure_message = None
-        self.sample_count = self.log_count = 0
+        self.sample_count = self.log_count = self.trace_count = 0
+        self.encoder_count = 0
         self.directory = directory
         self._accepting = True
         self._thread = threading.Thread(
-            target=self._run, args=(csv_file, log_file, writer),
+            target=self._run, args=(csv_file, log_file, trace_file, writer),
             name="car-host-recorder", daemon=False,
         )
         self._thread.start()
@@ -129,8 +153,24 @@ class SessionRecorder:
     def record_sample(self, sample: TelemetrySample) -> bool:
         return self._offer(sample)
 
+    def record_encoder_totals(self, snapshot: EncoderTotals) -> bool:
+        return self._offer(snapshot)
+
     def record_log(self, entry: LogEntry) -> bool:
         return self._offer(entry)
+
+    def record_trace(self, record: dict) -> bool:
+        """Freeze a bounded JSON snapshot, then write it on the recording thread."""
+        if not isinstance(record, dict):
+            raise ValueError("接收诊断记录必须为对象")
+        version = record.get("schema_version", TRACE_SCHEMA_VERSION)
+        if type(version) is not int or version != TRACE_SCHEMA_VERSION:
+            raise ValueError("接收诊断记录版本不支持")
+        line = json.dumps(dict(record, schema_version=TRACE_SCHEMA_VERSION), ensure_ascii=False,
+                          separators=(",", ":"), allow_nan=False) + "\n"
+        if len(line.encode("utf-8")) > MAX_TRACE_BYTES:
+            raise ValueError("接收诊断记录超过 16 KiB")
+        return self._offer(_TraceRecord(line))
 
     def take_notifications(self) -> tuple[str | None, int]:
         with self._lock:
@@ -146,8 +186,9 @@ class SessionRecorder:
             self._thread.join(timeout=timeout)
         return not self.is_running
 
-    def _run(self, csv_file, log_file, writer) -> None:
+    def _run(self, csv_file, log_file, trace_file, writer) -> None:
         last_flush = time.monotonic()
+        encoder_file = encoder_writer = None
         try:
             while not self._stop.is_set() or not self._queue.empty():
                 try:
@@ -163,15 +204,33 @@ class SessionRecorder:
                         row[name] = "" if value is None else json.dumps(value)
                     writer.writerow(row)
                     self.sample_count += 1
+                elif isinstance(item, EncoderTotals):
+                    if encoder_file is None:
+                        encoder_file = (self.directory / "encoder_totals.csv").open("x", encoding="utf-8-sig", newline="")
+                        encoder_writer = csv.DictWriter(encoder_file, fieldnames=ENCODER_CSV_FIELDS)
+                        encoder_writer.writeheader()
+                    row = {name: getattr(item, name, None) for name in ENCODER_CSV_FIELDS}
+                    row["raw_frame_hex"] = item.raw_frame.hex(" ").upper()
+                    encoder_writer.writerow(row)
+                    self.encoder_count += 1
                 elif isinstance(item, LogEntry):
                     log_file.write(item.persistent_text())
                     self.log_count += 1
+                elif isinstance(item, _TraceRecord):
+                    trace_file.write(item.line)
+                    self.trace_count += 1
                 if time.monotonic() - last_flush >= 0.5:
                     csv_file.flush()
                     log_file.flush()
+                    trace_file.flush()
+                    if encoder_file is not None:
+                        encoder_file.flush()
                     last_flush = time.monotonic()
             csv_file.flush()
             log_file.flush()
+            trace_file.flush()
+            if encoder_file is not None:
+                encoder_file.flush()
         except Exception as exc:
             with self._lock:
                 self._error = f"录制写入失败，文件可能不完整：{exc}"
@@ -186,13 +245,16 @@ class SessionRecorder:
                     self.failure_message = self._error
             try:
                 log_file.write(f"INTEGRITY samples={self.sample_count} logs={self.log_count} "
-                               f"dropped_records={self.dropped_total} failure={self.failure_message!r}\n")
+                               f"dropped_records={self.dropped_total} failure={self.failure_message!r} "
+                               f"traces={self.trace_count} encoder_totals={self.encoder_count}\n")
                 log_file.flush()
             except Exception as exc:
                 with self._lock:
                     self._error = f"完整性记录写入失败：{exc}"
                     self.failure_message = self._error
-            for handle in (log_file,):
+            for handle in (log_file, trace_file, encoder_file):
+                if handle is None:
+                    continue
                 try:
                     handle.close()
                 except Exception as exc:

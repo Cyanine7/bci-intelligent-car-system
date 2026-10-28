@@ -43,17 +43,17 @@ def main() -> int:
         preferences = replace(preferences, auto_connect=False)
         controller.add_log("本次启动已禁用自动连接；已保存的配置未修改")
     bridge = None
+    from .automation import AutomationQuitGuard, AutomationService
+    service = AutomationService(controller, project_directory, demo=demo)
+    quit_guard = AutomationQuitGuard(app, controller)
     if automation_enabled:
-        from .automation import AutomationQuitGuard, AutomationService
         from .automation_bridge import AutomationBridge
-        service = AutomationService(controller, project_directory, demo=demo)
         bridge = AutomationBridge(service, project_directory)
         if not bridge.start():
             service.shutdown()
             controller.add_log("自动化控制桥启动失败；可能已有实例正在使用", "ERROR")
             return 1
-        controller.add_log("本机自动化接口已开启；阶段须在聊天中批准，连接不会使能")
-        quit_guard = AutomationQuitGuard(app, controller)
+        controller.add_log("本机 MCP 接口已开启；只执行已冻结的授权实验表，连接不会使能")
     window = MainWindow(controller, preferences=preferences, preferences_store=store)
     startup = StartupAutoConnector(controller, window.current_preferences, parent=window)
     window.startup_connector = startup

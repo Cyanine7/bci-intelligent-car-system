@@ -203,8 +203,12 @@ def test_finished_worker_retains_all_events_beyond_one_poll_batch(fake_controlle
     worker.events.extend(event("rx", b"{C1:2:90}$") for _ in range(300))
     worker.events.append(event("closed", message="last close event"))
     worker.finished = True
-    for _ in range(4):
+    # Delivery is now also bounded by a real 5ms wall-time budget, so a
+    # fixed number of polls depends on the machine's speed.
+    for _ in range(64):
         controller.poll()
+        if controller.worker is None:
+            break
     assert controller.frames_received == 300
     assert controller.bytes_received == len(b"{C1:2:90}$") * 300
     assert controller.worker is None
@@ -462,6 +466,9 @@ def test_timed_out_recording_stop_updates_when_writer_naturally_finishes(
             return self.is_active
 
         def record_sample(self, sample):
+            return self.is_active
+
+        def record_trace(self, trace):
             return self.is_active
 
         def take_notifications(self):

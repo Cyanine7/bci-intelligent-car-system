@@ -9,7 +9,8 @@ from .client import BridgeClient, BridgeUnavailable
 
 TOOL_NAMES = frozenset({"get_status", "connect_device", "disconnect_device", "preview_plan",
                         "get_templates", "start_stage", "get_progress", "add_observation",
-                        "stop", "get_results"})
+                        "stop", "get_results", "start_plan", "get_communication_health", "suggest_refinement",
+                        "query_encoder_totals"})
 
 
 def create_server(project_directory: Path):
@@ -30,8 +31,8 @@ def create_server(project_directory: Path):
         finally:
             await bridge.close()
 
-    server = MCPServer("car-debug", version="1.0.0", lifespan=lifespan,
-                       instructions="附加到本项目已运行的自动化工作台。先预览具体计划，取得人对该 digest、阶段和架空现场就绪的明确批准，才可 start_stage。不得自行批准、猜测批准或使用工具参数冒充人的消息；不暴露原始发送或任意 ARM/SET。超时结果未知，禁止自动重发。")
+    server = MCPServer("car-debug", version="1.2.0", lifespan=lifespan,
+                       instructions="附加到已有工作台。运行前预览冻结具体digest并核对实际任务授权及架空现场就绪。已有人的完整测量授权可在明确预算、PWM、时长边界内沿用，无需重复许可；必须记录实际原话，不得伪造来源或自动扩权。细扫仅生成新草稿，不自动改当前表或执行。旧固件无实际分段CAPS时不能发送profile。不暴露原始发送或任意ARM/SET；超时未知不重发，STOP永久取消后续。")
 
     async def call(method: str, params: dict) -> dict[str, Any]:
         try:
@@ -45,6 +46,11 @@ def create_server(project_directory: Path):
         return await call("get_status", {})
 
     @server.tool(annotations=bounded_action)
+    async def query_encoder_totals() -> dict[str, Any]:
+        """显式查询全量编码器能力并启用20Hz累计快照；需失能、新鲜STATE和无在途动作。仅发送0A，不ARM、不清零计数、不运动；旧固件拒绝时不猜测或重发。"""
+        return await call("query_encoder_totals", {})
+
+    @server.tool(annotations=bounded_action)
     async def connect_device() -> dict[str, Any]:
         """按工作台已保存的 MAC/通道/PROJECT_V1 配置连接一次，仅 HELLO，不使能或运动。"""
         return await call("connect_device", {})
@@ -56,7 +62,7 @@ def create_server(project_directory: Path):
 
     @server.tool(annotations=bounded_action)
     async def preview_plan(plan: dict[str, Any]) -> dict[str, Any]:
-        """校验有限开环计划并返回展开表、plan_id 与 digest，不发送运动命令。plan 包含 name、stages；每阶段 stage_id/name/steps，每步 left_pwm/right_pwm/duration_ms/repetitions/label，可选 stop_after_ms。"""
+        """校验并冻结，不发送运动。旧固定PWM表兼容；schema_version=2需suite={suite_id,total_entered_budget(1..4096)}，阶段stage_id/name/block_id/rest_before_ms/steps。步骤固定PWM或两段segments=[{left_pwm,right_pwm,duration_ms},...]二选一，control_type=candidate/high_hold/zero_output/fixed_pwm，repetitions/label/stop_after_ms可选。每表最多128试次，PWM幅值最多10000、总运动最多4000ms；执行仍按实际CAPS较小上限门控，旧2000ms固件不会因此获得4000ms能力。修改或补测须新预览。"""
         return await call("preview_plan", {"plan": plan})
 
     @server.tool(annotations=read_only)
@@ -67,10 +73,28 @@ def create_server(project_directory: Path):
     @server.tool(annotations=bounded_action)
     async def start_stage(plan_id: str, plan_digest: str, stage_id: str,
                           approval_text: str, ready_confirmed: bool) -> dict[str, Any]:
-        """仅在人在聊天明确批准本次预览的 digest 与阶段，且确认车轮架空、现场就绪后调用。approval_text 记录人的原话；ready_confirmed 必须对应人的明确确认。参数本身不能证明人类来源，不得代人批准。立即返回 run_id，阶段在工作台本地执行，用 get_progress 查询。"""
+        """运行指定阶段。须核对本次digest在人的实际任务授权内并已架空就绪；已有完整测量授权可沿用，approval_text记录实际原话。参数本身不能证明人类来源，不得代人批准或扩大边界。立即返回run_id，用get_progress查询；不自动进入其他阶段。"""
         return await call("start_stage", dict(plan_id=plan_id, plan_digest=plan_digest,
                           stage_id=stage_id, approval_text=approval_text,
                           ready_confirmed=ready_confirmed))
+
+    @server.tool(annotations=bounded_action)
+    async def start_plan(plan_id: str, plan_digest: str, approval_text: str,
+                         ready_confirmed: bool) -> dict[str, Any]:
+        """运行当前整张有限冻结表及静置任务；真实授权、现场就绪、CAPS/新鲜STATE/完整录制均须成立。MCP独立心跳；STOP取消全部剩余段、试次和等待，不恢复或重发。可沿用已明确的完整测量授权，不能制造新授权、改变预算或用连接推定profile能力。"""
+        return await call("start_plan", dict(plan_id=plan_id, plan_digest=plan_digest,
+            approval_text=approval_text, ready_confirmed=ready_confirmed))
+
+    @server.tool(annotations=read_only)
+    async def get_communication_health() -> dict[str, Any]:
+        """读取当前会话各层采集年龄、交付延迟、解析/缓存/录制计数及停止观测；不连接、不ARM。UTC/monotonic/device tick不同来源，不把RPC往返当状态年龄，不称机械停时。"""
+        return await call("get_communication_health", {})
+
+    @server.tool(annotations=read_only)
+    async def suggest_refinement(side: str, direction: int,
+                                 run_ids: list[str] | None = None) -> dict[str, Any]:
+        """仅从已终结且原始校核通过的profile运行生成有预算的新细扫草稿。side=left/right，direction=-1/1；至少3时间块每档3次，混合/非单调/不足结果保持未定。先50后25PWM步长，对照与锚点计预算。不修改冻结版本、不自动执行；草稿需新preview_plan。"""
+        return await call("suggest_refinement", dict(side=side, direction=direction, run_ids=run_ids))
 
     @server.tool(annotations=read_only)
     async def get_progress() -> dict[str, Any]:
@@ -90,8 +114,8 @@ def create_server(project_directory: Path):
         return await call("stop", {"reason": reason})
 
     @server.tool(annotations=read_only)
-    async def get_results(run_id: str | None = None) -> dict[str, Any]:
+    async def get_results(run_id: str | None = None, suite_id: str | None = None) -> dict[str, Any]:
         """读取指定运行或最近一次运行的汇总与本地文件路径、完整性诊断；不读取任意路径。"""
-        return await call("get_results", {"run_id": run_id})
+        return await call("get_results", {"run_id": run_id, "suite_id": suite_id})
 
     return server

@@ -340,7 +340,7 @@
               <MiscControls>--diag_suppress=550</MiscControls>
               <Define>STM32F40_41xxx,USE_STDPERIPH_DRIVER,__FPU_PRESENT=1,__TARGET_FPU_VFP,ARM_MATH_CM4,__CC_ARM</Define>
               <Undefine></Undefine>
-              <IncludePath>..\CORE;..\SYSTEM\delay;..\SYSTEM\sys;..\SYSTEM\usart;..\USER;..\HARDWARE\LED;..\FWLIB\inc;..\FreeRTOS\include;..\FreeRTOS\portable\RVDS\ARM_CM4F;..\BALANCE;..\HARDWARE</IncludePath>
+              <IncludePath>..\CORE;..\SYSTEM\delay;..\SYSTEM\sys;..\SYSTEM\usart;..\USER;..\HARDWARE\LED;..\FWLIB\inc;..\FreeRTOS\include;..\FreeRTOS\portable\RVDS\ARM_CM4F;..\BALANCE;..\HARDWARE;..\IMU</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -605,9 +605,64 @@
               <FilePath>..\BALANCE\project_link.c</FilePath>
             </File>
             <File>
+              <FileName>speed_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BALANCE\speed_control.c</FilePath>
+            </File>
+            <File>
+              <FileName>speed_capture.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BALANCE\speed_capture.c</FilePath>
+            </File>
+            <File>
+              <FileName>speed_experiment.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BALANCE\speed_experiment.c</FilePath>
+            </File>
+<File>
+              <FileName>yaw_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BALANCE\yaw_control.c</FilePath>
+            </File>
+<File>
+              <FileName>yaw_experiment.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BALANCE\yaw_experiment.c</FilePath>
+            </File>
+            <File>
               <FileName>project_board.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\BALANCE\project_board.c</FilePath>
+            </File>
+            <File>
+              <FileName>sensor.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BALANCE\sensor.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>IMU</GroupName>
+          <Files>
+            <File>
+              <FileName>bsp_siic.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\IMU\bsp_siic.c</FilePath>
+            </File>
+            <File>
+              <FileName>imu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\IMU\imu.c</FilePath>
+            </File>
+            <File>
+              <FileName>icm20948_dmp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\IMU\icm20948_dmp.c</FilePath>
+            </File>
+            <File>
+              <FileName>icm20948.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\IMU\icm20948.c</FilePath>
             </File>
           </Files>
         </Group>

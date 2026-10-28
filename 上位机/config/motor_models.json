@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "空载/满电": {
+      "condition": "空载",
+      "k_left": 7.64622e-05,
+      "tau_left": 0.059,
+      "k_right": 7.59822e-05,
+      "tau_right": 0.059,
+      "name": "满电",
+      "reference_voltage": 12.6,
+      "notes": "",
+      "source": "手动编辑；来源 data/K_tau_summary_20261015/四组参数.json；4000附近增量模型"
+    },
+    "空载/满电正向": {
+      "condition": "空载",
+      "k_left": 7.66e-05,
+      "tau_left": 0.0595,
+      "k_right": 7.6e-05,
+      "tau_right": 0.059,
+      "name": "满电正向",
+      "reference_voltage": 12.6,
+      "notes": "",
+      "source": "手动编辑；来源 data/K_tau_NL_full_20261015/满电参数汇总.json；满电空载12.6V；4000附近增量模型"
+    },
+    "空载/满电正向重测": {
+      "condition": "空载",
+      "k_left": 7.20687e-05,
+      "tau_left": 0.102,
+      "k_right": 7.21277e-05,
+      "tau_right": 0.098,
+      "name": "满电正向重测",
+      "reference_voltage": 12.6,
+      "notes": "",
+      "source": "手动编辑；来源 data/K_tau_NL_full_20261015/满电参数汇总.json；满电空载12.6V；4000附近增量模型"
+    }
+  }
+}

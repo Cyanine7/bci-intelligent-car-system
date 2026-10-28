@@ -140,4 +140,6 @@ void systemInit(void)
 	
 	MiniBalance_PWM1_Init(16799,0);  //高级定时器TIM1的频率为168M，满PWM为16799，频率=168M/((16799+1)*(0+1))=10k
 	 	
+    /* Initialize the IMU after existing hardware setup, before scheduling. */
+    ICM20948_DMP_Init();
 }

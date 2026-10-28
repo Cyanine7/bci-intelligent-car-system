@@ -11,25 +11,64 @@ import secrets
 import struct
 import time
 
-from .models import TelemetrySample
+from .models import TelemetrySample, EncoderTotals
+from .speed_control_models import SPEED_COMMANDS, REPLY_LAYOUTS, encode_speed_command
+from .yaw_models import COMMANDS as YAW_COMMANDS, REPLIES as YAW_REPLIES, encode as encode_yaw
 
 
 PROJECT_V1 = "PROJECT_V1"
+PWM_MAX_DURATION_MS = 4000
+# 与固件PROJECT_SPEED_LIMIT一致：PWM 16500按负载模型折合约1.19m/s，取1.18。
+PROJECT_SPEED_LIMIT_MM_S = 1180
 HELLO, ARM, SET_PWM, STOP, SET_SPEED, GET_PARAMS, SET_PARAMS = range(1, 8)
 CAPS, ACK, STATE, PARAMS = range(0x81, 0x85)
+SET_PWM_PROFILE, GET_PROFILE_CAPS = 8, 9
+PROFILE_CAPS, STATE_PROFILE = 0x85, 0x86
+GET_ENCODER_CAPS = 10
+ENCODER_TOTALS, ENCODER_CAPS = 0x87, 0x88
+ENCODER_TOTALS_LAYOUT = struct.Struct("<HHIIIqqII")
+ENCODER_CAPS_LAYOUT = struct.Struct("<BBHHHIII")
 HEADER = struct.Struct("<2sBBHII")
 CAPS_LAYOUT = struct.Struct("<HHHHHHB")
 STATE_LAYOUT = struct.Struct("<IIiihhhhHhBBBBIIII")
 PARAMS_LAYOUT = struct.Struct("<IIIII")
+PROFILE_COMMAND_LAYOUT = struct.Struct("<BBHhhhhHHI")
+PROFILE_CAPS_LAYOUT = struct.Struct("<HBBHHHH")
+PROFILE_STATE_LAYOUT = struct.Struct("<IIIBBH")
 PARAMETER_KEYS = ("kp_left_q100", "ki_left_q100", "kp_right_q100", "ki_right_q100")
 COMMAND_TYPES = {"hello": HELLO, "arm_pwm": ARM, "arm_speed": ARM,
                  "set_pwm": SET_PWM, "stop": STOP, "set_speed": SET_SPEED,
-                 "read_parameters": GET_PARAMS, "apply_parameters": SET_PARAMS}
+                 "read_parameters": GET_PARAMS, "apply_parameters": SET_PARAMS,
+                 "query_profile_caps": GET_PROFILE_CAPS, "set_pwm_profile": SET_PWM_PROFILE,
+                 "query_encoder_totals": GET_ENCODER_CAPS}
+COMMAND_TYPES.update(SPEED_COMMANDS)
+COMMAND_TYPES.update(YAW_COMMANDS)
 ACK_MESSAGES = ("MCU 已接受", "长度或参数值错误", "会话不匹配", "旧序号",
                 "未使能或模式不符", "本地禁止", "已使能，不能修改参数",
                 "PI 未配置", "命令已过期", "未知命令")
 STOP_REASONS = ("启动 / 会话重建", "用户 STOP / 本地按键", "运动到期",
-                "本地禁止", "接收 / 发送溢出", "使能空闲到期")
+                "本地禁止", "接收 / 发送溢出", "使能空闲到期", "速度控制器故障")
+
+
+def validate_pwm_segments(segments, *, pwm_limit=10000, max_total_ms=PWM_MAX_DURATION_MS):
+    """Validate a complete finite profile without changing the caller's table."""
+    if not isinstance(segments, (list, tuple)) or len(segments) != 2:
+        raise ValueError("PWM profile 必须恰有两段")
+    normalized = []
+    for segment in segments:
+        if not isinstance(segment, dict) or set(segment) != {"left_pwm", "right_pwm", "duration_ms"}:
+            raise ValueError("每段必须包含 left_pwm / right_pwm / duration_ms")
+        left, right, duration = (segment[key] for key in ("left_pwm", "right_pwm", "duration_ms"))
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in (left, right, duration)):
+            raise ValueError("PWM profile 字段必须为整数")
+        if abs(left) > pwm_limit or abs(right) > pwm_limit or not 1 <= duration <= max_total_ms:
+            raise ValueError("PWM profile 幅值或时长越界")
+        normalized.append(dict(left_pwm=left, right_pwm=right, duration_ms=duration))
+    if sum(segment["duration_ms"] for segment in normalized) > max_total_ms:
+        raise ValueError("PWM profile 总时长越界")
+    if any(normalized[0][key] * normalized[1][key] < 0 for key in ("left_pwm", "right_pwm")):
+        raise ValueError("同一轮的 PWM profile 两段不得换向")
+    return normalized
 
 
 def crc16(data: bytes) -> int:
@@ -61,34 +100,88 @@ class ProjectV1Adapter:
     command_capabilities = {"arm_pwm": "open_loop", "set_pwm": "open_loop",
                             "arm_speed": "motion", "set_speed": "motion",
                             "stop": "telemetry", "read_parameters": "parameter_read",
-                            "apply_parameters": "parameter_write"}
+                            "apply_parameters": "parameter_write", "query_profile_caps": "telemetry",
+                            "query_encoder_totals": "telemetry",
+                            "set_pwm_profile": "pwm_profile"}
+    command_capabilities.update({name: "telemetry" for name in SPEED_COMMANDS})
+
+    command_capabilities.update({name: "telemetry" for name in YAW_COMMANDS})
 
     def __init__(self, source: str):
         self.source = source
         self.session = 0
+        self.speed_negotiated = False
+        self.yaw_negotiated = False
         self.seq = 0
         self._buffer = bytearray()
+        self._provenance = []
         self._issues = deque(maxlen=128)
         self._events = deque(maxlen=128)
+        self._encoder_samples = deque(maxlen=128)
+        self._diagnostic_events = deque(maxlen=128)
         self._partial_since = None
         self._last_state_tick = None
         self._last_state_seq = 0
+        self._parser_epoch = 0
+        self._counters = dict.fromkeys(("bytes_received", "frames_parsed", "rejected_frames",
+            "discarded_bytes", "issues_dropped", "version_errors", "length_errors", "crc_errors",
+            "partial_timeouts", "unknown_frames", "session_rejected", "state_invalid", "state_replayed",
+            "resync_bytes", "event_dropped", "diagnostics_dropped",
+            "encoder_invalid", "encoder_replayed"), 0)
         self.reset()
 
     def reset(self):
         # Stream loss must not reset sequence/session or revive cached commands.
+        if self._buffer:
+            self._discard(len(self._buffer), "parser_reset", self._provenance[-1]["monotonic"])
         self._buffer.clear()
+        self._provenance.clear()
         self._issues.clear()
         self._events.clear()
+        self._encoder_samples.clear()
+        self._last_encoder = None
         self._partial_since = None
         self._last_state_tick = None
         self._last_state_seq = 0
-        self._counters = dict(bytes_received=0, frames_parsed=0, rejected_frames=0,
-                              discarded_bytes=0, issues_dropped=0)
+        self._parser_epoch += 1
 
     @property
     def diagnostics(self):
-        return {**self._counters, "buffered_bytes": len(self._buffer)}
+        return {**self._counters, "buffered_bytes": len(self._buffer), "parser_epoch": self._parser_epoch}
+
+    def pop_diagnostics(self):
+        result = list(self._diagnostic_events)
+        self._diagnostic_events.clear()
+        return result
+
+    def _trace(self, reason, now, *, raw=None, provenance=None):
+        raw = bytes(self._buffer) if raw is None else raw
+        provenance = self._provenance if provenance is None else provenance
+        first = provenance[0] if provenance else {}
+        last = provenance[-1] if provenance else {}
+        entry = dict(reason=reason, parser_epoch=self._parser_epoch,
+            rx_first_block_id=first.get("rx_block_id"), rx_last_block_id=last.get("rx_block_id"),
+            candidate_started_monotonic=first.get("monotonic"), observed_monotonic=now,
+            candidate_age_ms=max(0.0, (now - first.get("monotonic", now)) * 1000),
+            buffered_bytes=len(raw), kind=raw[3] if len(raw) >= 4 else None,
+            length=struct.unpack_from("<H", raw, 4)[0] if len(raw) >= 6 else None,
+            session=struct.unpack_from("<I", raw, 6)[0] if len(raw) >= 10 else None,
+            seq=struct.unpack_from("<I", raw, 10)[0] if len(raw) >= 14 else None)
+        if len(self._diagnostic_events) == self._diagnostic_events.maxlen:
+            self._counters["diagnostics_dropped"] += 1
+        self._diagnostic_events.append(entry)
+        return entry
+
+    def _discard(self, count, reason, now):
+        if not count:
+            return
+        self._trace(reason, now)["discarded_bytes"] = count
+        self._counters["discarded_bytes"] += count
+        if reason in ("noise", "version", "length", "crc"):
+            self._counters["resync_bytes"] += count
+        del self._buffer[:count]
+        del self._provenance[:count]
+        self._partial_since = self._provenance[0]["monotonic"] if self._provenance else None
 
     def _issue(self, message):
         if len(self._issues) == self._issues.maxlen:
@@ -105,8 +198,15 @@ class ProjectV1Adapter:
         self._events.clear()
         return result
 
+    def pop_encoder_totals(self):
+        result = list(self._encoder_samples)
+        self._encoder_samples.clear()
+        return result
+
     def begin_session(self):
         self.reset()
+        self.speed_negotiated = False
+        self.yaw_negotiated = False
         self.session = secrets.randbelow(0xFFFFFFFF) + 1
         self.seq = 0
         return self.encode_command("hello")
@@ -119,7 +219,11 @@ class ProjectV1Adapter:
             raise ValueError("尚未建立 PROJECT_V1 会话")
         if self.seq == 0xFFFFFFFF:
             raise ValueError("序号已耗尽，请断开并创建新会话")
-        if command in ("hello", "stop", "read_parameters"):
+        if command in YAW_COMMANDS:
+            payload = encode_yaw(command, values)
+        elif command in SPEED_COMMANDS:
+            payload = encode_speed_command(command, values)
+        elif command in ("hello", "stop", "read_parameters", "query_profile_caps", "query_encoder_totals"):
             payload = b""
         elif command in ("arm_pwm", "arm_speed"):
             payload = bytes((1 if command == "arm_pwm" else 2,))
@@ -130,51 +234,71 @@ class ProjectV1Adapter:
             if any(isinstance(x, bool) or not isinstance(x, int) or not 0 <= x <= 2000000 for x in coefficients):
                 raise ValueError("q100 参数必须为 0..2000000 的整数")
             payload = struct.pack("<IIII", *coefficients)
+        elif command == "set_pwm_profile":
+            segments = validate_pwm_segments(values.get("segments"))
+            deadline = values.get("deadline_tick")
+            if isinstance(deadline, bool) or not isinstance(deadline, int) or not 0 <= deadline <= 0xFFFFFFFF:
+                raise ValueError("PWM profile 必须提供有效绝对期限")
+            first, second = segments
+            payload = PROFILE_COMMAND_LAYOUT.pack(1, 2, 0,
+                first["left_pwm"], first["right_pwm"], second["left_pwm"], second["right_pwm"],
+                first["duration_ms"], first["duration_ms"] + second["duration_ms"], deadline)
         else:
             try:
                 left, right, duration, deadline = (values[key] for key in ("left", "right", "duration_ms", "deadline_tick"))
             except KeyError as exc:
                 raise ValueError("运动命令缺少数值或绝对期限") from exc
-            limit = 6000 if command == "set_pwm" else 300
+            limit = 10000 if command == "set_pwm" else PROJECT_SPEED_LIMIT_MM_S
+            duration_limit = PWM_MAX_DURATION_MS if command == "set_pwm" else 1000
             if any(isinstance(x, bool) or not isinstance(x, int) for x in (left, right, duration, deadline)):
                 raise ValueError("运动命令字段必须为整数")
-            if not (-limit <= left <= limit and -limit <= right <= limit and 1 <= duration <= 1000 and 0 <= deadline <= 0xFFFFFFFF):
+            if not (-limit <= left <= limit and -limit <= right <= limit and 1 <= duration <= duration_limit and 0 <= deadline <= 0xFFFFFFFF):
                 raise ValueError("运动值、时长或绝对期限越界")
             payload = struct.pack("<hhHI", left, right, duration, deadline)
         self.seq += 1
         return encode_frame(COMMAND_TYPES[command], self.session, self.seq, payload)
 
-    def feed(self, chunk, received_monotonic=None, received_utc=None):
+    def feed(self, chunk, received_monotonic=None, received_utc=None, rx_metadata=None):
         if not isinstance(chunk, bytes):
             raise TypeError("chunk must be bytes")
+        # Processing-time timer calls are not evidence that new bytes arrived.
+        if not chunk:
+            return []
         now = time.monotonic() if received_monotonic is None else received_monotonic
         utc = received_utc or datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        origin = {**dict(rx_metadata or {}), "monotonic": now, "utc": utc}
         self._counters["bytes_received"] += len(chunk)
         if self._buffer and self._partial_since is not None and now - self._partial_since > .1:
-            self._counters["discarded_bytes"] += len(self._buffer)
-            self._buffer.clear()
-            self._partial_since = None
+            self._counters["partial_timeouts"] += 1
+            self._discard(len(self._buffer), "partial_timeout", now)
             self._issue("PROJECT_V1 半帧超过 100 ms，已丢弃并重新同步")
         samples = []
         # Process in small blocks; hostile input never expands the RX buffer.
         for offset in range(0, len(chunk), 64):
-            self._buffer.extend(chunk[offset:offset + 64])
+            block = chunk[offset:offset + 64]
+            self._buffer.extend(block)
+            self._provenance.extend([origin] * len(block))
+            if self._partial_since is not None:
+                self._trace("append", now)
             while self._buffer:
                 start = self._buffer.find(b"\xA5\x5A")
                 if start < 0:
                     keep = 1 if self._buffer[-1] == 0xA5 else 0
-                    self._counters["discarded_bytes"] += len(self._buffer) - keep
-                    self._buffer[:] = self._buffer[-1:] if keep else b""
+                    self._discard(len(self._buffer) - keep, "noise", now)
                     break
                 if start:
-                    self._counters["discarded_bytes"] += start
-                    del self._buffer[:start]
+                    self._discard(start, "noise", now)
+                if self._partial_since is None:
+                    self._partial_since = self._provenance[0]["monotonic"]
+                    self._trace("candidate", now)
                 if len(self._buffer) < HEADER.size:
                     break
                 _, version, kind, length, session, seq = HEADER.unpack_from(self._buffer)
                 if version != 1 or length > 64:
                     self._counters["rejected_frames"] += 1
-                    del self._buffer[0]
+                    reason = "version" if version != 1 else "length"
+                    self._counters[reason + "_errors"] += 1
+                    self._discard(1, reason, now)
                     self._issue("PROJECT_V1 版本或长度错误")
                     continue
                 total = HEADER.size + length + 2
@@ -183,29 +307,68 @@ class ProjectV1Adapter:
                 raw = bytes(self._buffer[:total])
                 if crc16(raw[2:-2]) != struct.unpack_from("<H", raw, total - 2)[0]:
                     self._counters["rejected_frames"] += 1
-                    del self._buffer[0]
+                    self._counters["crc_errors"] += 1
+                    self._discard(1, "crc", now)
                     self._issue("PROJECT_V1 CRC 错误，已丢弃")
                     continue
+                provenance = self._provenance[:total]
                 del self._buffer[:total]
+                del self._provenance[:total]
+                # A following partial frame starts in this RX chunk; it must
+                # not inherit the completed frame's timeout origin.
+                self._partial_since = None
                 if not self.session or session != self.session:
+                    self._counters["session_rejected"] += 1
+                    self._trace("session_rejected", now, raw=raw, provenance=provenance)
                     self._issue("忽略会话身份不匹配的 PROJECT_V1 回包")
                     continue
                 payload = raw[HEADER.size:-2]
-                layout = {CAPS: CAPS_LAYOUT, ACK: struct.Struct("<BB"), STATE: STATE_LAYOUT, PARAMS: PARAMS_LAYOUT}.get(kind)
+                layout = {CAPS: CAPS_LAYOUT, ACK: struct.Struct("<BB"), STATE: STATE_LAYOUT,
+                    STATE_PROFILE: struct.Struct("<IIiihhhhHhBBBBIIIIIIIBBH"),
+                    PARAMS: PARAMS_LAYOUT, PROFILE_CAPS: PROFILE_CAPS_LAYOUT,
+                    ENCODER_CAPS: ENCODER_CAPS_LAYOUT, ENCODER_TOTALS: ENCODER_TOTALS_LAYOUT,
+                    **REPLY_LAYOUTS, **YAW_REPLIES}.get(kind)
                 if layout is None or len(payload) != layout.size:
+                    self._counters["unknown_frames" if layout is None else "length_errors"] += 1
+                    self._trace("unknown_frame" if layout is None else "payload_length", now, raw=raw, provenance=provenance)
                     self._issue("PROJECT_V1 回包类型或长度错误")
                     continue
                 fields = layout.unpack(payload)
-                if kind == STATE:
-                    tick, last_seq, enc_l, enc_r, speed_l, speed_r, pwm_l, pwm_r, mv, battery, mode, armed, reason, local, rx_drop, tx_drop, rev, reserved = fields
-                    if last_seq > self.seq or mode > 2 or armed > 1 or local > 1 or reason > 5 or reserved:
+                if kind in (STATE, STATE_PROFILE):
+                    tick, last_seq, enc_l, enc_r, speed_l, speed_r, pwm_l, pwm_r, mv, battery, mode, armed, reason, local, rx_drop, tx_drop, rev, reserved = fields[:18]
+                    if (last_seq > self.seq or mode > (5 if self.yaw_negotiated else 4 if self.speed_negotiated else 2)
+                        or armed > 1 or local > 1 or reason > (6 if self.speed_negotiated or self.yaw_negotiated else 5) or reserved):
+                        self._counters["state_invalid"] += 1
+                        self._trace("state_invalid", now, raw=raw, provenance=provenance)
                         self._issue("PROJECT_V1 STATE 身份或状态值错误")
                         continue
+                    profile = dict(profile_seq=None, profile_start_tick=None, segment1_actual_tick=None,
+                                   segment_index=None, profile_status=None)
+                    if kind == STATE_PROFILE:
+                        profile_seq, anchor, actual, index, status, profile_reserved = fields[18:]
+                        invalid = (profile_reserved or status > 2 or index not in (0, 1, 255)
+                            or profile_seq > last_seq or (status == 0 and (profile_seq or anchor or actual or index != 255))
+                            or (status != 0 and not profile_seq) or (index != 1 and actual)
+                            or (status == 1 and (index == 255 or not armed or mode != 1))
+                            or (status == 2 and armed)
+                            or (status and ((tick-anchor) & 0xFFFFFFFF) >= 0x80000000)
+                            or (index == 1 and (((actual-anchor) & 0xFFFFFFFF) >= 0x80000000
+                                or ((tick-actual) & 0xFFFFFFFF) >= 0x80000000)))
+                        if invalid:
+                            self._counters["state_invalid"] += 1
+                            self._trace("profile_state_invalid", now, raw=raw, provenance=provenance)
+                            self._issue("PROJECT_V1 STATE_PROFILE 分段身份或状态值错误")
+                            continue
+                        profile = dict(profile_seq=profile_seq, profile_start_tick=anchor,
+                            segment1_actual_tick=actual, segment_index=index, profile_status=status)
                     if ((self._last_state_tick is not None and not 0 < ((tick - self._last_state_tick) & 0xFFFFFFFF) < 0x80000000)
                             or last_seq < self._last_state_seq):
+                        self._counters["state_replayed"] += 1
+                        self._trace("state_replayed", now, raw=raw, provenance=provenance)
                         self._issue("忽略设备 tick / last_seq 倒退的 STATE")
                         continue
                     self._last_state_tick, self._last_state_seq = tick, last_seq
+                    first, last = provenance[0], provenance[-1]
                     samples.append(TelemetrySample(now, utc, self.source, self.protocol,
                         abs(speed_l) / 1000, abs(speed_r) / 1000, battery,
                         quality=("battery_out_of_range",) if not 0 <= battery <= 100 else (),
@@ -214,13 +377,48 @@ class ProjectV1Adapter:
                         signed_left_speed_mps=speed_l / 1000, signed_right_speed_mps=speed_r / 1000,
                         battery_mv=mv, control_mode=mode, armed=bool(armed), stop_reason=reason,
                         local_enable=bool(local), rx_dropped=rx_drop, tx_dropped=tx_drop,
-                        parameter_revision=rev, device_last_seq=last_seq, device_session=session))
+                        parameter_revision=rev, device_last_seq=last_seq, device_session=session,
+                        frame_seq=seq, **profile, rx_first_block_id=first.get("rx_block_id"),
+                        rx_last_block_id=last.get("rx_block_id"), rx_first_monotonic=first["monotonic"],
+                        parent_read_monotonic=last.get("parent_read_monotonic"),
+                        worker_enqueued_monotonic=last.get("worker_enqueued_monotonic"),
+                        controller_started_monotonic=last.get("controller_started_monotonic"),
+                        controller_completed_monotonic=last.get("controller_completed_monotonic")))
+                elif kind == ENCODER_TOTALS:
+                    version, flags, epoch, tick, sample_seq, left, right, interval, delayed = fields
+                    previous = self._last_encoder
+                    invalid = (version != 1 or flags not in (0, 1)
+                        or (flags == 0 and any(fields[2:]))
+                        or (flags == 1 and not interval))
+                    replayed = previous is not None and (
+                        epoch != previous[0]
+                        or not 0 < ((tick - previous[1]) & 0xffffffff) < 0x80000000
+                        or not 0 < ((sample_seq - previous[2]) & 0xffffffff) < 0x80000000
+                        or not 0 < ((seq - previous[3]) & 0xffffffff) < 0x80000000
+                        or ((delayed - previous[4]) & 0xffffffff) >= 0x80000000)
+                    if invalid or replayed:
+                        self._counters["encoder_invalid" if invalid else "encoder_replayed"] += 1
+                        self._trace("encoder_invalid" if invalid else "encoder_replayed", now, raw=raw, provenance=provenance)
+                        self._issue("忽略无效或倒退的全量编码器快照")
+                        continue
+                    if flags:
+                        self._last_encoder = (epoch, tick, sample_seq, seq, delayed)
+                    if len(self._encoder_samples) == self._encoder_samples.maxlen:
+                        self._counters["event_dropped"] += 1
+                        self._issue("全量编码器快照缓存溢出")
+                    self._encoder_samples.append(EncoderTotals(
+                        now, utc, self.source, self.protocol, session, seq,
+                        epoch, tick, sample_seq, left, right, interval, delayed, bool(flags),
+                        raw_frame=raw, rx_first_block_id=provenance[0].get("rx_block_id"),
+                        rx_last_block_id=provenance[-1].get("rx_block_id")))
                 else:
                     if len(self._events) == self._events.maxlen:
+                        self._counters["event_dropped"] += 1
                         self._issue("PROJECT_V1 回包事件缓存溢出")
                     self._events.append(ProjectEvent(kind, session, seq, fields))
+                self._trace("accepted", now, raw=raw, provenance=provenance)
                 self._counters["frames_parsed"] += 1
-            self._partial_since = now if self._buffer and self._partial_since is None else self._partial_since
+            self._partial_since = self._provenance[0]["monotonic"] if self._buffer else None
             if not self._buffer:
                 self._partial_since = None
         return samples

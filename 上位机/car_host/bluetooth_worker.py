@@ -57,6 +57,13 @@ class _ProcessSession(QObject):
         self._control = deque()
         self._sequence = 0
         self._overflow = 0
+        self.overflow_total = 0
+        self._rx_block_sequence = 0
+        self._last_child_rx_block_id = 0
+        self._pulling_input = False
+        self._last_read_started = None
+        self._last_read_completed = None
+        self._input_bytes_read = 0
         self._started = False
         self._finished = False
         self._stopping = False
@@ -110,16 +117,39 @@ class _ProcessSession(QObject):
             self._write_ipc(encode_message("stop", self.connection_id))
             self._process.closeWriteChannel()
 
-    def drain_events(self, max_count: int = 256) -> list[IoEvent]:
+    def drain_events(self, max_count: int = 256, max_bytes: int | None = None) -> list[IoEvent]:
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+            raise ValueError("事件字节预算必须为非负整数")
         result = []
+        byte_count = 0
         for _ in range(max(0, min(max_count, self.EVENT_QUEUE_CAPACITY))):
             if not self._data and not self._control:
                 break
             if not self._data or (self._control and self._control[0][0] < self._data[0][0]):
-                result.append(self._control.popleft()[1])
+                queue = self._control
             else:
-                result.append(self._data.popleft()[1])
+                queue = self._data
+            event = queue[0][1]
+            if max_bytes is not None and byte_count + len(event.payload) > max_bytes:
+                break
+            result.append(queue.popleft()[1])
+            byte_count += len(event.payload)
         return result
+
+    def event_queue_snapshot(self) -> dict:
+        heads = [queue[0][1] for queue in (self._data, self._control) if queue]
+        return {"depth": len(self._data) + len(self._control),
+                "data_depth": len(self._data), "control_depth": len(self._control),
+                "oldest_monotonic": min((event.monotonic for event in heads), default=None),
+                "ipc_buffered_bytes": self._decoder.buffered_bytes,
+                "last_parent_read_started": self._last_read_started,
+                "last_parent_read_completed": self._last_read_completed,
+                "input_bytes_read": self._input_bytes_read,
+                "overflow_total": self.overflow_total}
+
+    def _record_overflow(self, count: int = 1) -> None:
+        self._overflow += count
+        self.overflow_total += count
 
     def take_overflow_count(self) -> int:
         count, self._overflow = self._overflow, 0
@@ -155,27 +185,50 @@ class _ProcessSession(QObject):
             return False
         return True
 
-    def _read_channel(self, channel) -> bytes:
+    def _read_channel(self, channel, max_bytes: int = MAX_PIPE_BYTES) -> bytes:
         self._process.setReadChannel(channel)
         available = self._process.bytesAvailable()
+        if not available:
+            return b""
         if available > MAX_PIPE_BYTES:
-            self._overflow += 1
+            self._record_overflow()
             self._fail_and_kill("蓝牙后台输出管道溢出，已结束连接")
             # Draining bounded pieces also prevents QProcess retaining output.
-            return bytes(self._process.read(MAX_PIPE_BYTES))
-        return bytes(self._process.read(min(available, MAX_PIPE_BYTES)))
+            return bytes(self._process.read(min(max_bytes, MAX_PIPE_BYTES)))
+        return bytes(self._process.read(min(available, max_bytes, MAX_PIPE_BYTES)))
 
     def _read_stdout(self) -> None:
-        data = self._read_channel(QProcess.ProcessChannel.StandardOutput)
-        if self._finished or self._kill_requested:
-            return
+        self.pull_available_input()
+
+    def pull_available_input(self, max_bytes: int = MAX_PIPE_BYTES) -> dict:
+        """Read one currently available pipe snapshot without waiting for Qt signals."""
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ValueError("IPC 读取预算必须为非负整数")
+        budget = min(max_bytes, MAX_PIPE_BYTES)
+        if self._finished or self._kill_requested or self._pulling_input:
+            return {"bytes_read": 0, "remaining_bytes": 0, "budget_exceeded": False,
+                    "reentrant": self._pulling_input}
+        self._pulling_input = True
+        self._last_read_started = time.monotonic()
+        data = b""
         try:
-            for message in self._decoder.feed(data):
-                if self._finished or self._kill_requested:
-                    break
-                self._handle_message(message)
+            data = self._read_channel(QProcess.ProcessChannel.StandardOutput, budget)
+            parent_read = time.monotonic()
+            self._input_bytes_read += len(data)
+            if not self._kill_requested:
+                for message in self._decoder.feed(data):
+                    if self._finished or self._kill_requested:
+                        break
+                    self._handle_message(message, parent_read_monotonic=parent_read)
         except IpcError as exc:
             self._fail_and_kill(f"蓝牙后台协议错误：{exc}")
+        finally:
+            self._last_read_completed = time.monotonic()
+            self._pulling_input = False
+        self._process.setReadChannel(QProcess.ProcessChannel.StandardOutput)
+        remaining = self._process.bytesAvailable() if not self._finished else 0
+        return {"bytes_read": len(data), "remaining_bytes": remaining,
+                "budget_exceeded": remaining > 0, "reentrant": False}
 
     def _read_stderr(self) -> None:
         data = self._read_channel(QProcess.ProcessChannel.StandardError)
@@ -187,7 +240,7 @@ class _ProcessSession(QObject):
             self._stderr_reported = True
             self._emit("status", message="蓝牙后台诊断：" + data[-1024:].decode("utf-8", "replace"))
 
-    def _handle_message(self, message: dict) -> None:
+    def _handle_message(self, message: dict, *, parent_read_monotonic: float | None = None) -> None:
         if message["connection_id"] != self.connection_id:
             return
         kind = message["kind"]
@@ -204,7 +257,16 @@ class _ProcessSession(QObject):
                 self._emit("opened", message=text or "蓝牙 SPP 已连接")
         elif kind == "rx":
             if self._opened and payload:
-                self._emit("rx", payload=payload, monotonic=message.get("monotonic"), utc=message.get("utc"))
+                block_id = message.get("rx_block_id")
+                if block_id is not None:
+                    if (type(block_id) is not int or not 1 <= block_id <= 0xFFFFFFFFFFFFFFFF
+                            or block_id <= max(self._last_child_rx_block_id, self._rx_block_sequence)):
+                        self._fail_and_kill("蓝牙 RX 块标识重放或倒退，接收完整性未知")
+                        return
+                    self._last_child_rx_block_id = block_id
+                self._emit("rx", payload=payload, monotonic=message.get("monotonic"), utc=message.get("utc"),
+                           rx_block_id=block_id,
+                           parent_read_monotonic=time.monotonic() if parent_read_monotonic is None else parent_read_monotonic)
         elif kind == "tx":
             if self._inflight is not None and request_id == self._inflight[0]:
                 if payload != self._inflight[1]:
@@ -225,7 +287,7 @@ class _ProcessSession(QObject):
             if address in self._known_devices:
                 return
             if len(self._known_devices) >= self.MAX_DEVICES:
-                self._overflow += 1
+                self._record_overflow()
                 return
             self._known_devices.add(address)
             self._emit("device", message=text, payload=address.encode("ascii"))
@@ -353,12 +415,18 @@ class _ProcessSession(QObject):
         self._process.setReadChannel(QProcess.ProcessChannel.StandardOutput)
 
     def _emit(self, kind: str, *, payload: bytes = b"", message: str = "", request_id: str = "",
-              monotonic: float | None = None, utc: str | None = None) -> None:
+              monotonic: float | None = None, utc: str | None = None,
+              rx_block_id: int | None = None, parent_read_monotonic: float | None = None) -> None:
         self._sequence += 1
+        if kind == "rx":
+            self._rx_block_sequence = max(self._rx_block_sequence + 1, rx_block_id or 0)
+            rx_block_id = self._rx_block_sequence if rx_block_id is None else rx_block_id
+        enqueued = time.monotonic()
         item = (self._sequence, IoEvent(kind=kind, payload=payload, message=message[:2048],
-            monotonic=time.monotonic() if monotonic is None else monotonic,
+            monotonic=enqueued if monotonic is None else monotonic,
             utc=utc if utc is not None else datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-            connection_id=self.connection_id, request_id=request_id))
+            connection_id=self.connection_id, request_id=request_id, rx_block_id=rx_block_id,
+            parent_read_monotonic=parent_read_monotonic, worker_enqueued_monotonic=enqueued))
         if kind in {"opened", "tx", "error", "closed", "status"}:
             if kind == "status":
                 statuses = [old for old in self._control if old[1].kind == "status"]
@@ -366,9 +434,9 @@ class _ProcessSession(QObject):
                     if statuses:
                         self._control.remove(statuses[0])
                     else:
-                        self._overflow += 1
+                        self._record_overflow()
                         return
-                    self._overflow += 1
+                    self._record_overflow()
             else:
                 # Reclaim ordinary status lines before consuming the three
                 # slots reserved for the last result, failure and closure.
@@ -377,17 +445,17 @@ class _ProcessSession(QObject):
                     if status is None:
                         break
                     self._control.remove(status)
-                    self._overflow += 1
+                    self._record_overflow()
             self._control.append(item)
             if (kind != "closed" and len(self._control) >= self.CONTROL_CAPACITY - 2
                     and not self._capacity_failed and not self._finished and not self._kill_requested):
                 self._capacity_failed = True
-                self._overflow += 1
+                self._record_overflow()
                 self._fail_and_kill("蓝牙关键事件缓存已满，已终止连接；后续发送不会重发")
         else:
             if len(self._data) >= self.EVENT_QUEUE_CAPACITY - self.CONTROL_CAPACITY:
                 self._data.popleft()
-                self._overflow += 1
+                self._record_overflow()
             self._data.append(item)
 
 

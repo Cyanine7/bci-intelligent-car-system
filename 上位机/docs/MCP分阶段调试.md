@@ -1,6 +1,6 @@
 # 本地 MCP 与分阶段开环调试
 
-2026-10-04，上位机 v0.5.0。本轮仅开发与软件验证，没有实车连接、控制、编译或烧录。架空实车的轮向、机械停止、真实链路时延与故障行为仍须分别验收。
+2026-10-04，上位机 v0.6.0。普通入口与MCP共用测量服务，支持单阶段及整表运行。详见 [电机测量工作台](电机测量工作台.md) 与 [本版验收](电机测量开发验收_20261004.md)。本轮已编译新固件，未新连接、烧录或测量实车。
 
 ## 启动和接入
 
@@ -19,7 +19,7 @@ codex mcp get car_debug --json
 
 本工作区已实际注册全局 `car_debug`，存于 `C:\Users\Lenovo\.codex\config.toml`，保持其余 MCP 配置不变。绝对入口 `launch.py` 不依赖客户端工作目录；移动工程后应重新注册路径。运行环境完整依赖锁为 `requirements-mcp-lock.txt`（本机 Windows / Python 3.14 验证）；只安装运行依赖，测试依赖另在 `requirements-mcp-dev.txt`。
 
-可发现的 10 个工具为 `get_status`、`connect_device`、`disconnect_device`、`get_templates`、`preview_plan`、`start_stage`、`get_progress`、`add_observation`、`stop` 和 `get_results`。工具发现已经通过官方 SDK 的真实 stdio 初始化与列举验收；既有聊天需要重载工具才能调用新增服务。
+可发现的13个工具为 `get_status`、`connect_device`、`disconnect_device`、`get_templates`、`preview_plan`、`start_stage`、`start_plan`、`get_progress`、`get_communication_health`、`suggest_refinement`、`add_observation`、`stop` 和 `get_results`。官方SDK真实stdio列举已验证；既有聊天须重载工具。
 
 普通 `启动上位机.bat` 保留原有启动时尝试一次连接的行为；只有 `--automation` 开启控制桥。自动化脚本显式携带 `--no-auto-connect`，不修改保存的偏好。已有旧窗口需退出并重新启动。
 
@@ -50,9 +50,9 @@ codex mcp get car_debug --json
 
 每阶段 1 个或多个步骤；重复次数展开为带编号的试次。最多 16 阶段、128 试次，单步骤重复 1..100 次。PWM 整数范围 ±6000，时长 1..1000 ms；开始前还按真实 CAPS 的较小上限复核。可指定 `stop_after_ms`，须大于 0 且小于运动时长；省略时按到期停止。提供轮向、重复启动、较长脉冲、速度曲线、到期停止和主动 STOP 六份草稿。
 
-预览返回随机批准版本 `plan_id`、内容 SHA256 `digest` 和展开的完整实验表。上位机“查看实验表与进度”窗口同步显示。修改实验表参数须重新预览，使旧批准版本失效；内容相同的重新预览也创建新批准版本。一个批准版本只启动一个阶段，后续阶段需重新预览并逐阶段批准。
+预览返回随机批准版本 `plan_id`、SHA256 `digest` 和完整展开表。每次编辑或重新预览使旧版本失效。一个版本只启动一次，使用 `start_stage` 选阶段或 `start_plan` 运行整张冻结表。含分段的显式预览会查询实际扩展能力，确认后才可开始。v2格式和预算见工作台说明。
 
-助手必须先展示当前阶段全部 PWM、时长、重复次数和停止条件，再等待人明确确认该版本及“已架空、现场准备完成”。随后 `start_stage` 使用 `plan_id`、`plan_digest`、`stage_id`、`approval_text` 和 `ready_confirmed=true`。批准原话会记录；布尔参数与文字本身不能证明人的授权，MCP 客户端/助手必须遵守实际对话授权，不能自行填写确认。
+先展示冻结表的PWM、时长、重复、静置、停止条件和预算，并核对人的实际授权及现场准备条件；已有明确任务授权可复用。`start_stage` 使用 `plan_id`、`plan_digest`、`stage_id`、`approval_text` 和 `ready_confirmed=true`；`start_plan` 不需stage_id。保存原话、来源、冻结摘要与实际范围。布尔参数、客户端文字和历史数值不能代替真实授权或扩大范围。
 
 本次批准只覆盖开发与假设备验证，首次实车实验需随后单独批准。既有分析中的 900/1300 PWM 等建议不作为已批准值。
 
@@ -64,7 +64,7 @@ codex mcp get car_debug --json
 
 MCP 客户端保持持久 TCP 连接，每秒发送心跳；连接消失或心跳超过 3 秒，中止阶段并尝试 STOP。掉线、会话变化、STATE 超过 500 ms、本地禁止、原始/实验记录失败、缓存丢失和 MCU 丢失累计变化同样中止。STOP 不保证穿透故障链路，日志分别保存排队、ACK 与 STATE 确认或未知。
 
-运行期间人工 ARM/运动/参数读写被协调层拒绝，按钮禁用并显示原因；STOP 始终保留。人工断开、关闭或停止录制会先取消阶段。取消不可恢复，后续 ARM/PWM 不再发送。图形与日志暂停仍然采集和录制。阶段结束保存报告后释放控制权，不自动执行下一阶段、重连、恢复参数或重发命令。
+运行期间人工 ARM/运动/参数操作被拒绝，STOP始终保留。人工断开、主窗关闭或停止录制取消全部后续；关闭测量窗取消本地来源运行。MCP有1秒心跳/3秒失联中止，本地运行依赖窗口存活。整表严格执行冻结顺序与静置，单阶段结束不自动运行其他阶段。取消不可恢复；不重连、重发或恢复参数。暂停与最小化继续录制。
 
 零反馈 1 秒是软件继续条件，不能证明机械停稳。使用者必须在旁监督并记录物理方向、停稳和异常。首版自动停止试验为到期及主动 STOP；本地开关/断联作为故障中止场景，实车专项验收另行安排。
 
@@ -91,7 +91,7 @@ MCP 客户端保持持久 TCP 连接，每秒发送心跳；连接消失或心�
 
 ## 软件验收与复现
 
-本轮完整 pytest 为 438 项及 4 个子测试通过。Qt 环境跳过的 SDK 专项已在独立 MCP 环境中验证，7 项通过；两个环境 `pip check` 均正常。故障覆盖和 GUI 截图见 [验证记录](验证记录.md)。
+v0.5历史结果为438项及4个子测试通过；本版最终回归、SDK、GUI及固件证据见 [v0.6验收记录](电机测量开发验收_20261004.md)。
 
 在本目录运行以下脚本可验证官方 SDK → stdio MCP → TCP 桥 → Qt 正式入口 → PROJECT_V1 假设备 → 原始记录与报告的完整路径：
 
@@ -99,4 +99,4 @@ MCP 客户端保持持久 TCP 连接，每秒发送心跳；连接消失或心�
 .\.venv-mcp\Scripts\python.exe scripts\verify_mcp_end_to_end.py
 ```
 
-脚本拒绝已存在的控制桥，使用 `--automation-demo --no-auto-connect` 与 offscreen GUI；输出均在 `.qa/`，不扫描或连接实车。它列举 10 工具，显式连接软件假设备，执行两次到期停止与一次主动 STOP，验证独立心跳、文件关联和退出清理。其测试 PWM 仅用于假设备，不构成实车实验表或授权。
+脚本在.qa内创建隔离项目端点，使用正式入口代码、`--automation-demo --no-auto-connect` 与offscreen GUI，不附加已有实物工作台。列举13工具，执行旧固定PWM/主动STOP及v2分段整表、静置、健康、建议和独立复算，验证心跳与退出清理。测试PWM仅用于软件夹具。

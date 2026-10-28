@@ -7,6 +7,7 @@ import binascii
 import ctypes as c
 from pathlib import Path
 import struct
+import re
 import sys
 import unittest
 
@@ -17,6 +18,7 @@ dll.test_output.argtypes = (c.POINTER(c.c_int), c.POINTER(c.c_int))
 dll.test_drain.argtypes = (c.c_void_p, c.c_uint)
 dll.test_drain.restype = c.c_uint
 dll.test_speed.argtypes = (c.c_float, c.c_float)
+dll.test_encoder.argtypes = (c.c_uint32, c.c_uint32, c.c_int32, c.c_int32)
 
 def frame(t, seq, payload=b'', session=1234):
     body = struct.pack('<BBHII', 1, t, len(payload), session, seq) + payload
@@ -60,7 +62,7 @@ class CoreTests(unittest.TestCase):
     def hello(self,tick=100):
         packets=self.send(1,1,tick=tick)
         self.ack(packets,1,0)
-        self.assertEqual([p[3] for p in packets if p[0]==0x81][0],struct.pack('<6HB',15,6000,300,1000,100,20,1))
+        self.assertEqual([p[3] for p in packets if p[0]==0x81][0],struct.pack('<6HB',15,10000,1180,4000,100,20,1))
 
     def start(self,tick=100,deadline=300,duration=200):
         self.hello(tick)
@@ -156,9 +158,12 @@ class CoreTests(unittest.TestCase):
 
     def test_range_bad_length_and_unconfigured_pi(self):
         self.hello();self.ack(self.send(2,2,b'\x01'),2,0)
-        self.ack(self.send(3,3,struct.pack('<hhHI',6001,0,100,200)),3,1)
+        self.ack(self.send(3,3,struct.pack('<hhHI',10001,0,100,200)),3,1)
         self.ack(self.send(3,4,b'\x00'),4,1)
-        self.ack(self.send(3,5,struct.pack('<hhHI',1,1,1001,1101)),5,1)
+        # 工作区的旧开环上限已扩为4秒；拒绝用例应超过实际常量，而非旧的2秒。
+        header=(Path(__file__).resolve().parents[1]/'BALANCE'/'project_link.h').read_text(encoding='utf-8')
+        limit=int(re.search(r'#define\s+PROJECT_MAX_DURATION\s+(\d+)',header)[1])
+        self.ack(self.send(3,5,struct.pack('<hhHI',1,1,limit+1,limit+101)),5,1)
         self.assertEqual(self.output(),(0,0))
 
     def test_arm_idle_timeout(self):
@@ -202,6 +207,176 @@ class CoreTests(unittest.TestCase):
     def test_partial_timeout_then_valid_frame(self):
         raw=frame(1,1)[:9];dll.test_rx(raw,len(raw));dll.test_tick(100,1);self.drain()
         self.hello(tick=210)
+
+    def profile_query(self, tick=100):
+        packets=self.send(9,2,tick=tick)
+        self.ack(packets,2,0)
+        self.assertEqual([p[3] for p in packets if p[0]==0x85],
+                         [struct.pack('<HBBHHHH',3,1,2,10000,4000,100,20)])
+
+    def profile(self, *, tick=100, deadline=1100, first=400, total=1000,
+                left=1400, second=900):
+        self.hello(tick);self.profile_query(tick)
+        self.ack(self.send(2,3,b'\x01',tick=tick),3,0)
+        body=struct.pack('<BBHhhhhHHI',1,2,0,left,0,second,0,first,total,deadline)
+        packets=self.send(8,4,body,tick=tick);self.ack(packets,4,0)
+        return body
+
+    def profile_state(self,tick,ok=1):
+        dll.test_tick(tick,ok)
+        packets=self.drain()
+        states=[p[3] for p in packets if p[0]==0x86]
+        self.assertEqual(len(states),1)
+        self.assertEqual(len(states[0]),64)
+        self.assertEqual(states[0][44:48],bytes(4))
+        return states[0],struct.unpack('<IIIBBH',states[0][48:])
+
+    def test_extended_profile_upper_limit_and_expiry(self):
+        self.profile(tick=100,deadline=2100,first=1000,total=2000,left=9000,second=10000)
+        self.assertEqual(self.output(),(9000,0))
+        dll.test_tick(1100,1);self.drain();self.assertEqual(self.output(),(10000,0))
+        dll.test_tick(2099,1);self.drain();self.assertEqual(self.output(),(10000,0))
+        dll.test_tick(2100,1);self.drain();self.assertEqual(self.output(),(0,0))
+
+    def test_extended_profile_stop_cancels_high_second_segment(self):
+        self.profile(tick=100,deadline=2100,first=1000,total=2000,left=4000,second=10000)
+        self.ack(self.send(4,5,tick=500),5,0)
+        dll.test_tick(1100,1);self.drain();self.assertEqual(self.output(),(0,0))
+
+    def test_four_second_profile_switch_expiry_and_stop(self):
+        self.profile(tick=100,deadline=4100,first=2000,total=4000,left=4000,second=10000)
+        dll.test_tick(2099,1);self.drain();self.assertEqual(self.output(),(4000,0))
+        dll.test_tick(2100,1);self.drain();self.assertEqual(self.output(),(10000,0))
+        dll.test_tick(4099,1);self.drain();self.assertEqual(self.output(),(10000,0))
+        dll.test_tick(4100,1);self.drain();self.assertEqual(self.output(),(0,0))
+        dll.test_reset()
+        self.profile(tick=100,deadline=4100,first=2000,total=4000,left=4000,second=10000)
+        self.ack(self.send(4,5,tick=500),5,0)
+        dll.test_tick(2200,1);self.drain();self.assertEqual(self.output(),(0,0))
+
+    def test_profile_golden_and_default_old_host_state_compatibility(self):
+        body=struct.pack('<BBHhhhhHHI',1,2,0,1400,0,900,0,400,1000,1100)
+        self.assertEqual(frame(8,4,body).hex(),
+            'a55a01081400d2040000040000000102000078050000840300009001e8034c040000e22f')
+        self.assertEqual(frame(9,2).hex(),'a55a01090000d204000002000000a668')
+        self.hello()
+        dll.test_tick(150,1)
+        self.assertEqual([p[0] for p in self.drain()],[0x83])
+        # Without explicit negotiation a profile is not executable.
+        self.ack(self.send(8,2,body,tick=160),2,9)
+        self.assertEqual(self.output(),(0,0))
+
+    def test_profile_two_outputs_same_pwm_metadata_and_no_renewal(self):
+        body=self.profile(second=1400)
+        self.assertEqual(self.output(),(1400,0))
+        self.ack(self.send(8,5,body,tick=110),5,4)
+        self.ack(self.send(3,6,struct.pack('<hhHI',900,0,1000,1110),tick=110),6,4)
+        self.ack(self.send(2,7,b'\x01',tick=110),7,4)
+        _,meta=self.profile_state(450)
+        self.assertEqual(meta,(4,100,0,0,1,0))
+        state,meta=self.profile_state(507)
+        self.assertEqual(meta,(4,100,507,1,1,0))
+        self.assertEqual(struct.unpack_from('<h',state,20)[0],1400)
+        _,meta=self.profile_state(1100)
+        self.assertEqual(self.output(),(0,0));self.assertEqual(meta,(4,100,507,1,2,0))
+        self.ack(self.send(2,8,b'\x01',tick=1110),8,0)
+        _,meta=self.profile_state(1150)
+        self.assertEqual(meta,(0,0,0,255,0,0))
+
+    def test_profile_short_deadline_stop_and_local_disable_cancel_second(self):
+        self.profile(deadline=300)
+        _,meta=self.profile_state(300)
+        self.assertEqual(meta,(4,100,0,0,2,0));self.assertEqual(self.output(),(0,0))
+        _,meta=self.profile_state(550)
+        self.assertEqual(meta,(4,100,0,0,2,0));self.assertEqual(self.output(),(0,0))
+        for stop_type in ('protocol','local','overflow'):
+            dll.test_reset();self.profile()
+            if stop_type=='protocol': self.ack(self.send(4,5,tick=200),5,0)
+            elif stop_type=='local': dll.test_tick(200,0);self.drain()
+            else: dll.test_error();dll.test_tick(200,1);self.drain()
+            _,meta=self.profile_state(550)
+            self.assertEqual(meta,(4,100,0,0,2,0));self.assertEqual(self.output(),(0,0))
+
+    def test_profile_accepted_then_stop_before_output_is_not_execution(self):
+        self.hello();self.profile_query();self.ack(self.send(2,3,b'\x01'),3,0)
+        body=struct.pack('<BBHhhhhHHI',1,2,0,1400,0,900,0,400,1000,1100)
+        raw=frame(8,4,body)+frame(4,5)
+        dll.test_rx(raw,len(raw));dll.test_tick(110,1)
+        packets=self.drain();self.ack(packets,4,0);self.ack(packets,5,0)
+        state,meta=self.profile_state(150)
+        self.assertEqual(meta,(4,110,0,255,2,0));self.assertEqual(self.output(),(0,0))
+        self.assertEqual(state[29:31],b'\x00\x01')
+
+    def test_profile_bad_fields_atomic_rejection_and_wrong_mode(self):
+        self.hello();self.profile_query()
+        valid=(1,2,0,1400,0,900,0,400,1000,1100)
+        for seq,(slot,value) in enumerate(((0,2),(1,3),(2,1),(3,10001),(5,-1),(7,0),(7,1000),(8,4001)),start=3):
+            bad=list(valid);bad[slot]=value
+            self.ack(self.send(8,seq,struct.pack('<BBHhhhhHHI',*bad)),seq,1)
+            self.assertEqual(self.output(),(0,0))
+        self.ack(self.send(8,11,struct.pack('<BBHhhhhHHI',*valid)),11,4)
+        self.ack(self.send(2,12,b'\x01'),12,0)
+        self.ack(self.send(9,13),13,4)
+        self.ack(self.send(8,14,struct.pack('<BBHhhhhHHI',*valid)[:-1]),14,1)
+        expired=list(valid);expired[-1]=99
+        self.ack(self.send(8,15,struct.pack('<BBHhhhhHHI',*expired)),15,8)
+
+    def test_profile_wrap_replay_and_tx_overflow_cancel(self):
+        self.profile(tick=0xfffffff0,deadline=0x54,first=40,total=100)
+        _,meta=self.profile_state(0x28)
+        self.assertEqual(meta,(4,0xfffffff0,0x28,1,1,0))
+        body=struct.pack('<BBHhhhhHHI',1,2,0,1400,0,900,0,40,100,0x80)
+        self.ack(self.send(8,4,body,tick=0x30),4,3)
+        _,meta=self.profile_state(0x5a)
+        self.assertEqual(meta[-2],2);self.assertEqual(self.output(),(0,0))
+        dll.test_reset();self.profile()
+        for seq in range(5,45):
+            raw=frame(6,seq);dll.test_rx(raw,len(raw));dll.test_tick(110,1)
+        self.assertEqual(self.output(),(0,0));self.drain()
+        state,meta=self.profile_state(550)
+        self.assertEqual(meta[-2],2);self.assertEqual(meta[3],0)
+        self.assertGreater(struct.unpack_from('<I',state,36)[0],0)
+
+    def test_encoder_all_control_samples_while_disarmed_and_separate_sequence(self):
+        self.hello()
+        packets=self.send(10,2,tick=110)
+        self.ack(packets,2,0)
+        self.assertEqual([p[3] for p in packets if p[0]==0x88],[struct.pack('<BBHHHIII',1,64,100,20,0,1560,66000,160000)])
+        for tick,a,b in [(110,1,-2),(120,3,-4),(130,5,-6),(140,7,-8),(150,9,-10)]:
+            dll.test_encoder(tick,10,a,b)
+            dll.test_tick(tick,1)
+        packets=self.drain()
+        cumulative=[p for p in packets if p[0]==0x87]
+        self.assertEqual(len(cumulative),1)
+        self.assertEqual(struct.unpack('<HHIIIqqII',cumulative[0][3]),(1,1,110,150,5,25,-30,10,0))
+        self.assertEqual(self.output(),(0,0))
+        self.assertEqual([p[2] for p in packets if p[0]==0x83],[2])
+
+    def test_encoder_totals_survive_stop_hello_and_need_explicit_query(self):
+        dll.test_encoder(10,10,7800,-7800)
+        packets=self.send(1,1,tick=100)
+        self.ack(packets,1,0)
+        self.assertFalse(any(p[0]==0x87 for p in packets))
+        self.ack(self.send(10,2,tick=110),2,0)
+        self.ack(self.send(4,3,tick=120),3,0)
+        self.ack(self.send(1,1,tick=160,session=5678),1,0)
+        packets=self.send(10,2,tick=210,session=5678)
+        self.ack(packets,2,0)
+        total=[p for p in packets if p[0]==0x87][0]
+        self.assertEqual(total[2],1)
+        self.assertEqual(struct.unpack('<HHIIIqqII',total[3])[5:7],(7800,-7800))
+
+    def test_encoder_query_rejects_armed_and_long_sample_is_diagnosed(self):
+        self.hello()
+        self.ack(self.send(2,2,b'\x01',tick=110),2,0)
+        self.ack(self.send(10,3,tick=120),3,4)
+        self.ack(self.send(4,4,tick=130),4,0)
+        dll.test_encoder(150,31,-3,4)
+        packets=self.send(10,5,tick=150)
+        self.ack(packets,5,0)
+        fields=struct.unpack('<HHIIIqqII',[p[3] for p in packets if p[0]==0x87][0])
+        self.assertEqual(fields[-2:],(31,1))
+        self.assertEqual(self.output(),(0,0))
 
 if __name__=='__main__':
     unittest.main(verbosity=2)

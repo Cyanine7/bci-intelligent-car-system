@@ -416,7 +416,10 @@ def test_control_heartbeat_or_client_loss_cancels_stage(automation, loss):
         service.client_lost("test-client")
         assert service.status()["phase"] == "stopping"
     else:
-        pump(host, clock, service, seconds=3.1)
+        # Keep transport/STATE fresh while only the control heartbeat expires.
+        # A single 3.1s clock jump also creates a genuine receive flood/stale STATE.
+        service._heartbeats["test-client"] = clock() - 3.1
+        pump(host, clock, service)
     drive(automation, lambda: not service.active, heartbeat=False)
     assert service.status()["phase"] == "aborted"
     assert ("心跳" if loss == "heartbeat" else "控制连接") in service.status()["reason"]

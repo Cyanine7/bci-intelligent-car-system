@@ -199,7 +199,10 @@ def test_real_backend_starts_and_stops_without_operating_bluetooth(qapp):
         assert spin(qapp, worker.isFinished, 6)
         assert worker._process.exitCode() == 0, worker._stderr_tail.decode("utf-8", "replace")
         events = collect(worker)
-        assert [event.kind for event in events] == ["closed"]
+        # The Anaconda-backed interpreter may print a startup diagnostic to
+        # stderr. It is a status event, not a Bluetooth operation or failure.
+        assert [event.kind for event in events if event.kind != "status"] == ["closed"]
+        assert all(event.message.startswith("蓝牙后台诊断：") for event in events if event.kind == "status")
     finally:
         worker.request_stop()
         assert spin(qapp, worker.isFinished, 3)

@@ -34,7 +34,7 @@ typedef struct
 //Wheelspacing
 //轮距 
 #define Akm_wheelspacing         0.162f
-#define Diff_wheelSpacing        0.177f
+#define Diff_wheelSpacing        0.160f
 //Axlespacing
 //轴距 
 #define Akm_axlespacing           0.144f
@@ -51,7 +51,7 @@ typedef struct
 //Black tire, tank_car wheel diameter
 //黑色轮胎车轮直径
 #define	  Small_WheelDiameter   0.065
-#define	  Great_WheelDiameter   0.085
+#define	  Great_WheelDiameter   0.066
 
 //The encoder octave depends on the encoder initialization Settings
 //编码器倍频数，取决于编码器初始化设置

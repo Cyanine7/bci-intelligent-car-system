@@ -135,6 +135,8 @@ def test_default_profile_does_not_start_scan_or_connection_in_window(fake_workbe
     host, window = fake_workbench
     window.kind_combo.setCurrentIndex(2)
     assert host.worker is None and host.scanner is None
+    assert not window.bluetooth_panel.isVisible()
+    window.connection_shortcut.click()
     assert window.bluetooth_panel.isVisible()
     assert not window.serial_fields.isVisible()
     assert not window.baud_combo.isEnabled()
@@ -426,3 +428,35 @@ def test_close_waits_asynchronously_and_automatically_retries(fake_workbench, qa
     spin_until(qapp, lambda: not window.isVisible())
     heartbeat.stop()
     assert host.worker is None and not host.timer.isActive()
+
+@pytest.mark.parametrize('size', [(1000, 720), (1320, 900)])
+def test_task_navigation_and_offline_speed_design(fake_workbench, qapp, size):
+    host, window = fake_workbench
+    window.resize(*size)
+    qapp.processEvents()
+    tabs = window.workspace_tabs
+    assert [tabs.tabText(i) for i in range(tabs.count())] == ['实时监测', '速度环实验', '角速度环实验', '设备与调试']
+    assert tabs.currentIndex() == 0
+    assert window.connect_button.isVisible() and window.stop_button.isVisible()
+    assert not window.kind_combo.isVisible() and not window.send_editor.isVisible()
+    assert window.speed_panel is None
+    tabs.setCurrentIndex(1)
+    qapp.processEvents()
+    panel = window.speed_panel
+    assert panel.isVisible() and not panel.isWindow()
+    assert [panel.tabs.tabText(i) for i in range(panel.tabs.count())] == ['电机模型', 'PI 参数', '阶跃执行', '曲线与指标']
+    assert panel.buttons['calculate'].isEnabled()
+    assert not any(panel.buttons[key].isEnabled() for key in ('caps', 'apply', 'arm', 'run', 'stop'))
+    assert panel.geometry().right() <= window.speed_page.width()
+    panel.mp.setValue(10)
+    panel.buttons['calculate'].click()
+    gain = panel.gain_boxes[0].value()
+    assert gain > 0
+    window.connection_shortcut.click()
+    qapp.processEvents()
+    assert tabs.currentIndex() == 3 and window.bluetooth_panel.isVisible()
+    assert window.connect_button.isVisible() and window.stop_button.isVisible()
+    window.tool_buttons['speed_control'].click()
+    assert tabs.currentIndex() == 1 and window.speed_panel is panel
+    assert panel.gain_boxes[0].value() == gain
+    assert host.worker is None and host.scanner is None

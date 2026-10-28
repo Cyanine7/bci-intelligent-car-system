@@ -65,6 +65,54 @@ def test_crc_length_noise_half_frame_timeout_and_bounded_storage():
     assert any("100 ms" in issue for issue in adapter.pop_issues())
 
 
+@pytest.mark.parametrize("next_prefix", [1, 8, 14, 44, 63])
+def test_new_partial_frame_does_not_inherit_completed_frame_timeout(next_prefix):
+    adapter = ProjectV1Adapter("SERIAL")
+    adapter.begin_session()
+    first = state_frame(adapter, tick=1000)
+    second = state_frame(adapter, tick=1050)
+    assert adapter.feed(first[:36], 1.0) == []
+    samples = adapter.feed(first[36:] + second[:next_prefix], 1.083)
+    assert [sample.device_time_ms for sample in samples] == [1000]
+    # The stream has contained partial input for 114 ms, but the second
+    # candidate itself has only waited 31 ms.
+    samples = adapter.feed(second[next_prefix:], 1.114)
+    assert [sample.device_time_ms for sample in samples] == [1050]
+    assert samples[0].received_monotonic == 1.114
+    assert adapter.pop_issues() == []
+
+
+def test_successive_partial_candidates_across_multiple_frames():
+    adapter = ProjectV1Adapter("SERIAL")
+    adapter.begin_session()
+    first, second, third, fourth = [state_frame(adapter, tick=tick)
+                                    for tick in (1000, 1050, 1100, 1150)]
+    assert adapter.feed(first[:36], 1.0) == []
+    samples = adapter.feed(first[36:] + second + third[:8], 1.083)
+    assert [sample.device_time_ms for sample in samples] == [1000, 1050]
+    samples = adapter.feed(third[8:] + fourth[:44], 1.088)
+    assert [sample.device_time_ms for sample in samples] == [1100]
+    samples = adapter.feed(fourth[44:], 1.119)
+    assert [sample.device_time_ms for sample in samples] == [1150]
+    assert adapter.pop_issues() == []
+
+
+def test_new_partial_frame_still_expires_after_100_ms():
+    adapter = ProjectV1Adapter("SERIAL")
+    adapter.begin_session()
+    first = state_frame(adapter, tick=1000)
+    second = state_frame(adapter, tick=1050)
+    third = state_frame(adapter, tick=1100)
+    assert adapter.feed(first[:36], 1.0) == []
+    samples = adapter.feed(first[36:] + second[:44], 1.083)
+    assert [sample.device_time_ms for sample in samples] == [1000]
+    # Even with the candidate origin reset correctly, 108 ms must expire.
+    samples = adapter.feed(second[44:] + third, 1.191)
+    assert [sample.device_time_ms for sample in samples] == [1100]
+    assert any("100 ms" in issue for issue in adapter.pop_issues())
+    assert adapter.diagnostics["buffered_bytes"] == 0
+
+
 def test_session_reserved_and_time_identity_are_validated():
     adapter = ProjectV1Adapter("SERIAL")
     adapter.begin_session()

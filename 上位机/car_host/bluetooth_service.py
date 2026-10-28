@@ -139,6 +139,7 @@ class BluetoothService(QObject):
         self._pump = None
         self._devices = set()
         self._device_limit_reported = False
+        self._rx_block_sequence = 0
         self._commands = Queue(maxsize=self.MAX_COMMANDS)
         self._reader_failure = deque(maxlen=1)
         self._reader_eof = threading.Event()
@@ -283,9 +284,13 @@ class BluetoothService(QObject):
             if not self._socket.bytesAvailable():
                 break
             data = bytes(self._socket.read(MAX_PAYLOAD_BYTES))
+            captured = time.monotonic()
+            captured_utc = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
             if not data:
                 break
-            self._event("rx", payload=data)
+            self._rx_block_sequence += 1
+            self._event("rx", payload=data, rx_block_id=self._rx_block_sequence,
+                        monotonic=captured, utc=captured_utc)
         if self._socket.bytesAvailable():
             QTimer.singleShot(0, self._receive)
 
@@ -328,10 +333,15 @@ class BluetoothService(QObject):
         if app is not None:
             app.exit(exit_code)
 
-    def _event(self, kind: str, *, payload: bytes = b"", message: str = "", request_id: str = "") -> None:
+    def _event(self, kind: str, *, payload: bytes = b"", message: str = "", request_id: str = "",
+               rx_block_id: int | None = None, monotonic: float | None = None,
+               utc: str | None = None) -> None:
+        fields = {"rx_block_id": rx_block_id} if rx_block_id is not None else {}
         self.emit_message(encode_message(kind, self.connection_id, payload=payload,
-            message=message[:2048], request_id=request_id, monotonic=time.monotonic(),
-            utc=datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")))
+            message=message[:2048], request_id=request_id,
+            monotonic=time.monotonic() if monotonic is None else monotonic,
+            utc=utc or datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            **fields))
 
 
 def main() -> int:

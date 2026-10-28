@@ -26,6 +26,7 @@ dll.test_tick.argtypes=(c.c_uint32,c.c_int)
 dll.test_drain.argtypes=(c.c_void_p,c.c_uint)
 dll.test_drain.restype=c.c_uint
 dll.test_output.argtypes=(c.POINTER(c.c_int),c.POINTER(c.c_int))
+dll.test_encoder.argtypes=(c.c_uint32,c.c_uint32,c.c_int32,c.c_int32)
 dll.test_reset()
 
 with tempfile.TemporaryDirectory(prefix='bci-bridge-') as directory:
@@ -95,5 +96,51 @@ with tempfile.TemporaryDirectory(prefix='bci-bridge-') as directory:
     assert len(rows)==2
     assert all(row['protocol']==PROJECT_V1 and row['connection_id']==host.connection_id for row in rows)
     assert rows[-1]['armed']=='False' and rows[-1]['device_last_seq']==str(host.adapter.seq)
+
+    # Explicit capability discovery changes only this session's telemetry
+    # shape. A regular HELLO above generated no automatic discovery traffic.
+    query=host.motion.query_profile_caps();assert query.success
+    pump(560);pump(600)
+    assert host.capabilities.pwm_profile and host.latest.profile_status==0
+    assert host.latest.segment_index==255 and len(host.latest.raw_frame)==80
+    arm=host.motion.arm_pwm();assert arm.success
+    pump(610);pump(650)
+    profile=host.motion.set_pwm_profile([
+        dict(left_pwm=1400,right_pwm=0,duration_ms=200),
+        dict(left_pwm=1400,right_pwm=0,duration_ms=200)])
+    assert profile.success
+    profile_seq=host.adapter.seq
+    pump(660);pump(700)
+    assert output()==(1400,0) and host.latest.profile_seq==profile_seq
+    assert host.latest.segment_index==0 and host.latest.profile_start_tick==660
+    assert not host.motion.set_pwm_profile([
+        dict(left_pwm=900,right_pwm=0,duration_ms=200),
+        dict(left_pwm=900,right_pwm=0,duration_ms=200)]).success
+    pump(857);pump(867);pump(910)
+    assert output()==(1400,0) and host.latest.segment_index==1
+    assert host.latest.segment1_actual_tick==867  # 100 Hz task's actual late tick.
+    stop=host.motion.stop();assert stop.success
+    pump(920);pump(970)
+    assert output()==(0,0) and host.latest.profile_status==2
+    assert host.latest.segment_index==1 and host.latest.segment1_actual_tick==867
+    # All five real control samples are accumulated, not just the last STATE.
+    query=host.encoder_totals.query();assert query.success
+    for tick in range(980,1030,10):
+        dll.test_encoder(tick,10,0,0);pump(tick)
+    assert host.capabilities.encoder_totals and host.encoder_totals.fresh
+    assert host.encoder_totals.begin().success
+    for tick in range(1030,1080,10):
+        dll.test_encoder(tick,10,1560,-1560);pump(tick)
+    for tick in range(1080,1280,10):
+        dll.test_encoder(tick,10,0,0);pump(tick)
+    measured=host.encoder_totals.finish()
+    assert measured.success
+    assert measured.values['delta_left']==7800 and measured.values['delta_right']==-7800
+    assert measured.values['counts_per_left_turn']==measured.values['counts_per_right_turn']==1560
+    deadline=time.monotonic()+3
+    while host.recorder.is_running and time.monotonic()<deadline:
+        app.processEvents();host.poll();time.sleep(.005)
+    assert not host.recorder.is_running
+    assert (host.recorder.directory/'encoder_totals.csv').exists()
     assert host.shutdown()
-print('PASS: actual HostController <-> actual MCU C core: handshake, PWM expiry, PI RAM readback, speed, STOP, CSV recording.')
+print('PASS: actual HostController <-> actual MCU C core: handshake, PWM expiry, PI RAM readback, speed, STOP, CSV, explicit profile negotiation and identical-PWM segment evidence.')

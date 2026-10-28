@@ -15,6 +15,7 @@ class ToolSpec:
     label: str
     required_capabilities: tuple[str, ...] = ()
     factory: Callable[[Any], Any] | None = None
+    protocols: tuple[str, ...] = ()
 
     @property
     def tool_id(self) -> str:
@@ -56,6 +57,8 @@ class ToolRegistry:
 
     def availability(self, tool_id: str, capabilities: DeviceCapabilities) -> ToolAvailability:
         spec = self.get(tool_id)
+        if spec.protocols and capabilities.protocol not in spec.protocols:
+            return ToolAvailability(False, f"{spec.label}需要{' / '.join(spec.protocols)}；当前{capabilities.protocol}")
         for name in spec.required_capabilities:
             if not capabilities.supports(name):
                 return ToolAvailability(False, capabilities.reason_for(name))
@@ -82,10 +85,22 @@ def create_default_tool_registry() -> ToolRegistry:
         from .project_panels import ParameterPanel
         return ParameterPanel(gateway)
 
+    def encoder_panel(gateway):
+        from .encoder_panel import EncoderTotalsPanel
+        return EncoderTotalsPanel(gateway)
+
+    def speed_panel(gateway):
+        from .speed_control_panel import SpeedControlPanel
+        return SpeedControlPanel(gateway)
+
     for spec in (
         ToolSpec("open_loop", "开环实验", ("open_loop",), lambda gateway: motion_panel(gateway, 1)),
         ToolSpec("pid", "PID / PI调参", ("parameter_read", "parameter_write"), parameters_panel),
         ToolSpec("motion", "运动控制", ("motion",), lambda gateway: motion_panel(gateway, 2)),
+        ToolSpec("encoder", "全量编码器 · 五圈计数", ("telemetry",), encoder_panel, ("PROJECT_V1",)),
+        # Offline model/PI design is available before connecting. Device actions
+        # are gated by fresh STATE and negotiated capabilities inside the panel.
+        ToolSpec("speed_control", "速度环实验", (), speed_panel),
     ):
         registry.register(spec)
     return registry

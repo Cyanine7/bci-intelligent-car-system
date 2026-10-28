@@ -23,9 +23,9 @@ def test_snapshot_expansion_digest_and_detachment():
     assert build_plan(raw)["digest"] != plan["digest"]
 
 
-@pytest.mark.parametrize("field,value", [("left_pwm", True), ("right_pwm", 6001),
-    ("left_pwm", -6001), ("left_pwm", None), ("duration_ms", False),
-    ("duration_ms", 0), ("duration_ms", 1001), ("repetitions", 101),
+@pytest.mark.parametrize("field,value", [("left_pwm", True), ("right_pwm", 10001),
+    ("left_pwm", -10001), ("left_pwm", None), ("duration_ms", False),
+    ("duration_ms", 0), ("duration_ms", 4001), ("repetitions", 101),
     ("repetitions", 0), ("repetitions", True), ("stop_after_ms", 500),
     ("stop_after_ms", 0), ("stop_after_ms", True), ("label", "换行\n文字")])
 def test_rejects_invalid_values(field, value):
@@ -72,7 +72,7 @@ def test_caps_validation_and_snapshot_tampering():
 
 def test_templates_are_detached_unapproved_drafts():
     templates = get_templates()
-    assert len(templates) == 6
+    assert len(templates) == 7
     for template in templates:
         with pytest.raises(ValueError):
             build_plan(template)

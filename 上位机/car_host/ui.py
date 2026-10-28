@@ -1,8 +1,9 @@
-"""中文四区调试工作台；所有串口行为交给 HostController。"""
+"""按监测、速度实验和设备调试分区；通信行为交给 HostController。"""
 
 from __future__ import annotations
 
 import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
-    QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QScrollArea, QSpinBox, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from .controller import HostController
@@ -41,6 +42,8 @@ QLabel#metric { font-size: 27px; font-weight: 700; color: #1f5964; }
 QLabel#muted { color: #7a8c9d; font-weight: 400; }
 QFrame#metricCard { background: #f3f7fa; border-radius: 6px; }
 QSplitter::handle { background: #e1e8ee; }
+QTabBar::tab { padding: 10px 24px; color: #526a80; }
+QTabBar::tab:selected { color: #205e66; background: white; font-weight: 700; border-bottom: 3px solid #276f78; }
 QStatusBar { background: #e3ebf1; color: #425c73; }
 """
 
@@ -74,6 +77,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(STYLE)
         self._last_plot_frame = -1
         self._last_plot_update = 0.0
+        self._pending_display_logs = deque(maxlen=1000)
+        self.display_logs_dropped = 0
         root = QWidget()
         root.setObjectName("workbench")
         self.setCentralWidget(root)
@@ -85,7 +90,7 @@ class MainWindow(QMainWindow):
         heading = QVBoxLayout()
         title = QLabel("小车调试工作台")
         title.setObjectName("title")
-        subtitle = QLabel("通信监测 · 实时曲线 · 实验数据记录")
+        subtitle = QLabel("实时监测 · 速度环实验 · 角速度环实验 · 设备与调试")
         subtitle.setObjectName("subtitle")
         heading.addWidget(title)
         heading.addWidget(subtitle)
@@ -95,16 +100,60 @@ class MainWindow(QMainWindow):
         self.source_badge.setObjectName("badge")
         header.addWidget(self.source_badge)
         layout.addLayout(header)
-        layout.addWidget(self._build_connection_bar())
+        # Connection configuration belongs to the device page; everyday actions
+        # remain visible above every task, including the experiment page.
+        connection_settings = self._build_connection_bar()
+        actions = QHBoxLayout()
+        self.connection_shortcut = QPushButton("设备设置")
+        actions.addWidget(self.connection_shortcut)
+        actions.addStretch()
+        for button in (self.connect_button, self.disconnect_button, self.record_button, self.stop_button):
+            actions.addWidget(button)
+        layout.addLayout(actions)
+        self.workspace_tabs = QTabWidget()
+        layout.addWidget(self.workspace_tabs, 1)
+        monitor = QWidget()
+        monitor_layout = QVBoxLayout(monitor)
+        monitor_layout.setContentsMargins(0, 6, 0, 0)
+        self.workspace_tabs.addTab(monitor, "实时监测")
+        self.speed_page = QWidget()
+        self.speed_page_layout = QVBoxLayout(self.speed_page)
+        self.speed_page_layout.setContentsMargins(0, 6, 0, 0)
+        self.speed_panel = None
+        self.workspace_tabs.addTab(self.speed_page, "速度环实验")
+        self.yaw_page = QWidget()
+        self.yaw_page_layout = QVBoxLayout(self.yaw_page)
+        self.yaw_page_layout.setContentsMargins(0, 6, 0, 0)
+        self.yaw_panel = None
+        self.workspace_tabs.addTab(self.yaw_page, "角速度环实验")
+        device = QWidget()
+        device_layout = QVBoxLayout(device)
+        device_layout.addWidget(connection_settings)
+        device_layout.addWidget(self._build_tool_panel())
+        device_layout.addWidget(self._build_send_panel())
+        device_scroll = QScrollArea()
+        device_scroll.setWidgetResizable(True)
+        device_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        device_scroll.setWidget(device)
+        self.workspace_tabs.addTab(device_scroll, "设备与调试")
+        self.connection_shortcut.clicked.connect(lambda: self.workspace_tabs.setCurrentIndex(3))
+        self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         if controller.automation_service is not None:
             bar = QHBoxLayout()
             self.automation_status_value = QLabel("等待实验表与阶段批准")
             self.automation_status_value.setWordWrap(True)
             bar.addWidget(self.automation_status_value, 1)
-            self.automation_view_button = QPushButton("查看实验表与进度")
+            self.automation_view_button = QPushButton("电机测量工作台")
             self.automation_view_button.clicked.connect(self._show_automation)
             bar.addWidget(self.automation_view_button)
-            layout.addLayout(bar)
+            device_layout.addLayout(bar)
+        health_bar = QHBoxLayout()
+        health_bar.addStretch()
+        self.health_button = QPushButton("通信健康与软件停止观测")
+        self.health_button.clicked.connect(self._show_health)
+        health_bar.addWidget(self.health_button)
+        device_layout.addLayout(health_bar)
+        device_layout.addStretch()
 
         vertical = QSplitter(Qt.Orientation.Vertical)
         upper = QSplitter(Qt.Orientation.Horizontal)
@@ -113,7 +162,6 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(6)
         left_layout.addWidget(self._build_data_panel(), 3)
-        left_layout.addWidget(self._build_send_panel(), 2)
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -127,20 +175,25 @@ class MainWindow(QMainWindow):
         vertical.addWidget(upper)
         vertical.addWidget(self._build_log_panel())
         vertical.setSizes([530, 220])
-        layout.addWidget(vertical, 1)
-        self.statusBar().showMessage("模拟设备可无硬件演示；蓝牙首次配对请在 Windows 设置完成。")
+        monitor_layout.addWidget(vertical, 1)
+        self.statusBar().showMessage("速度环与角速度环：模型、PI设计、有限两段实验和曲线；连接设置在“设备与调试”。")
 
         self.controller.changed.connect(self.refresh_state)
         self.controller.log_added.connect(self._append_log)
-        self.controller.logs_cleared.connect(self.log_view.clear)
+        self.controller.logs_cleared.connect(self._clear_display_logs)
+        self._display_timer = QTimer(self)
+        self._display_timer.setInterval(100)
+        self._display_timer.timeout.connect(self._flush_display)
+        self._display_timer.start()
         self.refresh_ports()
         self._connection_kind_changed()
         self.recording_status_label = QLabel("未录制")
         self.statusBar().addPermanentWidget(self.recording_status_label)
         self.refresh_state()
+        self._flush_display()
 
     def _build_connection_bar(self) -> QGroupBox:
-        box = QGroupBox("连接与记录")
+        box = QGroupBox("设备连接设置")
         column = QVBoxLayout(box)
         column.setSpacing(8)
         row = QHBoxLayout()
@@ -308,7 +361,7 @@ class MainWindow(QMainWindow):
         return card, value
 
     def _build_data_panel(self) -> QGroupBox:
-        box = QGroupBox("01  数据监测")
+        box = QGroupBox("数据监测")
         column = QVBoxLayout(box)
         row = QHBoxLayout()
         left_card, self.left_value = self._metric_card("左轮速度幅值 · m/s")
@@ -351,7 +404,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_send_panel(self) -> QGroupBox:
-        box = QGroupBox("02  手动发送")
+        box = QGroupBox("手动原始发送")
         column = QVBoxLayout(box)
         row = QHBoxLayout()
         self.send_format = QComboBox()
@@ -375,26 +428,31 @@ class MainWindow(QMainWindow):
         self.send_result.setObjectName("muted")
         self.send_result.setWordWrap(True)
         column.addWidget(self.send_result)
-        future = QHBoxLayout()
+        self.send_button.clicked.connect(self._send)
+        self.send_format.currentIndexChanged.connect(lambda: self.line_ending.setEnabled(self.send_format.currentIndex() == 0))
+        return box
+
+    def _build_tool_panel(self) -> QGroupBox:
+        box = QGroupBox("其他设备功能")
+        column = QVBoxLayout(box)
+        future = QGridLayout()
         self.tool_buttons: dict[str, QPushButton] = {}
-        for specification in self.tool_registry.tools():
+        for index, specification in enumerate(self.tool_registry.tools()):
             button = QPushButton(specification.label)
             button.setEnabled(False)
             button.clicked.connect(lambda checked=False, tool_id=specification.id: self._open_tool(tool_id))
             self.tool_buttons[specification.id] = button
-            future.addWidget(button)
+            future.addWidget(button, index // 3, index % 3)
         self.pid_button = self.tool_buttons.get("pid")
         column.addLayout(future)
         self.tool_reason_label = QLabel()
         self.tool_reason_label.setWordWrap(True)
         self.tool_reason_label.setObjectName("muted")
         column.addWidget(self.tool_reason_label)
-        self.send_button.clicked.connect(self._send)
-        self.send_format.currentIndexChanged.connect(lambda: self.line_ending.setEnabled(self.send_format.currentIndex() == 0))
         return box
 
     def _build_plot_panel(self) -> QGroupBox:
-        box = QGroupBox("03  实时曲线")
+        box = QGroupBox("实时曲线")
         column = QVBoxLayout(box)
         row = QHBoxLayout()
         self.left_channel = QCheckBox("左轮速度幅值")
@@ -438,7 +496,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_log_panel(self) -> QGroupBox:
-        box = QGroupBox("04  通信与事件日志")
+        box = QGroupBox("通信与事件日志")
         column = QVBoxLayout(box)
         row = QHBoxLayout()
         self.log_format = QComboBox()
@@ -646,6 +704,9 @@ class MainWindow(QMainWindow):
     def _open_tool(self, tool_id: str) -> None:
         if self._closing:
             return
+        if tool_id == "speed_control":
+            self.workspace_tabs.setCurrentIndex(1)
+            return
         existing = self._tool_windows.get(tool_id)
         if existing is not None:
             existing.show()
@@ -669,6 +730,19 @@ class MainWindow(QMainWindow):
             dialog.show()
         except Exception as exc:
             self.controller.add_log(f"功能面板无法打开：{exc}", "ERROR")
+
+    def _workspace_changed(self, index: int) -> None:
+        if index == 2 and self.yaw_panel is None and not self._closing:
+            from .yaw_panel import YawPanel
+            self.yaw_panel = YawPanel(self.controller)
+            self.yaw_page_layout.addWidget(self.yaw_panel)
+            return
+        if index != 1 or self.speed_panel is not None or self._closing:
+            return
+        from .speed_control_panel import SpeedControlPanel
+        self.speed_panel = SpeedControlPanel(self.controller)
+        self.speed_panel.setParent(self.speed_page, Qt.WindowType.Widget)
+        self.speed_page_layout.addWidget(self.speed_panel)
 
     def _refresh_tools(self) -> None:
         capabilities = getattr(self.controller, "capabilities", None)
@@ -698,15 +772,42 @@ class MainWindow(QMainWindow):
 
     def _append_log(self, entry) -> None:
         if not self.log_pause.isChecked():
-            self.log_view.appendPlainText(entry.format(self.log_format.currentIndex() == 1))
+            if len(self._pending_display_logs) == self._pending_display_logs.maxlen:
+                self.display_logs_dropped += 1
+            self._pending_display_logs.append(entry)
         if entry.level in ("WARNING", "ERROR"):
             self.statusBar().showMessage(entry.message)
         elif entry.direction == "TX":
             self.send_result.setText(entry.message)
+        # Explicit user-operation failures remain immediate; RX rendering is
+        # always deferred outside the receive pump.
+        if entry.level in ("WARNING", "ERROR") and not self.controller._pumping_io:
+            self._flush_display()
+
+    def _clear_display_logs(self):
+        self._pending_display_logs.clear()
+        self.log_view.clear()
+
+    def _flush_display(self):
+        if self.controller._pumping_io:
+            return
+        started = time.monotonic()
+        log_count = len(self._pending_display_logs)
+        if not self.log_pause.isChecked() and self._pending_display_logs:
+            entries = list(self._pending_display_logs)
+            self._pending_display_logs.clear()
+            self.log_view.appendPlainText("\n".join(
+                entry.format(self.log_format.currentIndex() == 1) for entry in entries))
+        self._refresh_plot()
+        self.controller.recorder.record_trace(dict(event="ui_refresh", started_monotonic=started,
+            completed_monotonic=time.monotonic(), pending_logs=log_count,
+            display_logs_dropped=self.display_logs_dropped, log_paused=self.log_pause.isChecked(),
+            plot_paused=self.plot_pause.isChecked(), minimized=self.isMinimized()))
 
     def _rebuild_logs(self) -> None:
         if self.log_pause.isChecked():
             return
+        self._pending_display_logs.clear()
         self.log_view.setPlainText("\n".join(entry.format(self.log_format.currentIndex() == 1) for entry in self.controller.logs))
         self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
@@ -718,7 +819,8 @@ class MainWindow(QMainWindow):
     def _plot_pause_changed(self, paused: bool) -> None:
         if not paused:
             self._last_plot_frame = -1
-            self.refresh_state()
+            self._last_plot_update = 0.0
+            self._refresh_plot()
 
     def _clear_plot(self) -> None:
         self.controller.clear_history()
@@ -807,8 +909,10 @@ class MainWindow(QMainWindow):
             self.record_button.setStyleSheet("color: #a3483b; font-weight: 600;")
         else:
             self.record_button.setStyleSheet("")
+    def _refresh_plot(self):
+        host = self.controller
         now = time.monotonic()
-        if not self.plot_pause.isChecked() and now - self._last_plot_update >= 0.05:
+        if not self.plot_pause.isChecked() and now - self._last_plot_update >= 0.1:
             # Fixed time axis also exposes gaps instead of extending the last sample.
             samples = tuple(host.history.samples)
             if samples:
@@ -833,6 +937,16 @@ class MainWindow(QMainWindow):
         if panel is None:
             panel = AutomationPanel(self.controller.automation_service, self)
             self._tool_windows["automation"] = panel
+        panel.show()
+        panel.raise_()
+        panel.activateWindow()
+
+    def _show_health(self):
+        from .health_panel import CommunicationHealthPanel
+        panel = self._tool_windows.get("health")
+        if panel is None:
+            panel = CommunicationHealthPanel(self.controller, self)
+            self._tool_windows["health"] = panel
         panel.show()
         panel.raise_()
         panel.activateWindow()

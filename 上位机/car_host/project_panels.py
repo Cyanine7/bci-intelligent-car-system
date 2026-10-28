@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import (QDialog, QGridLayout, QHBoxLayout, QLabel,
                                QPushButton, QSpinBox, QVBoxLayout)
 
-from .project_protocol import PARAMETER_KEYS, STOP_REASONS
+from .project_protocol import PARAMETER_KEYS, PROJECT_SPEED_LIMIT_MM_S, STOP_REASONS
 
 
 def state_description(host):
@@ -38,11 +38,11 @@ class MotionPanel(QDialog):
         layout.addWidget(self.arm_hint)
         grid = QGridLayout()
         self.left, self.right, self.duration = QSpinBox(), QSpinBox(), QSpinBox()
-        limit = 6000 if mode == 1 else 300
+        limit = 10000 if mode == 1 else PROJECT_SPEED_LIMIT_MM_S
         for field in (self.left, self.right):
             field.setRange(-limit, limit)
             field.setValue(0)
-        self.duration.setRange(1, 1000)
+        self.duration.setRange(1, 2000 if mode == 1 else 1000)
         self.duration.setValue(200)
         for row, (label, field) in enumerate((("左轮 PWM" if mode == 1 else "左轮 mm/s", self.left),
                 ("右轮 PWM" if mode == 1 else "右轮 mm/s", self.right), ("时长 ms", self.duration))):

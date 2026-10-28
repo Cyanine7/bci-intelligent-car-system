@@ -99,7 +99,8 @@ def test_official_sdk_stdio_discovery_without_endpoint(tmp_path):
             for tool in tools.tools:
                 assert tool.annotations.open_world_hint is False
                 assert tool.annotations.read_only_hint is (tool.name in {
-                    "get_status", "get_templates", "get_progress", "get_results"})
+                    "get_status", "get_templates", "get_progress", "get_results",
+                    "get_communication_health", "suggest_refinement"})
             result = await client.call_tool("get_status", {})
             assert result.structured_content["error"] == "bridge_unavailable"
         assert not (tmp_path / ".runtime").exists()

@@ -7,6 +7,30 @@ Vector3 = tuple[float, float, float]
 
 
 @dataclass(frozen=True)
+class EncoderTotals:
+    """A coherent MCU snapshot of every control-cycle count; never a STATE."""
+
+    received_monotonic: float
+    received_utc: str
+    source: str
+    protocol: str
+    device_session: int
+    frame_seq: int
+    epoch_tick: int
+    device_time_ms: int
+    sample_seq: int
+    total_left: int
+    total_right: int
+    interval_ms: int
+    delayed_samples: int
+    initialized: bool
+    raw_frame: bytes = b""
+    connection_id: str = ""
+    rx_first_block_id: int | None = None
+    rx_last_block_id: int | None = None
+
+
+@dataclass(frozen=True)
 class TelemetrySample:
     """One received measurement; unavailable firmware fields remain ``None``."""
 
@@ -40,3 +64,16 @@ class TelemetrySample:
     parameter_revision: int | None = None
     device_last_seq: int | None = None
     device_session: int | None = None
+    frame_seq: int | None = None
+    profile_seq: int | None = None
+    profile_start_tick: int | None = None
+    segment1_actual_tick: int | None = None
+    segment_index: int | None = None
+    profile_status: int | None = None
+    rx_first_block_id: int | None = None
+    rx_last_block_id: int | None = None
+    rx_first_monotonic: float | None = None
+    parent_read_monotonic: float | None = None
+    worker_enqueued_monotonic: float | None = None
+    controller_started_monotonic: float | None = None
+    controller_completed_monotonic: float | None = None

@@ -16,7 +16,7 @@ from .project_protocol import PROJECT_V1, ProjectV1Adapter
 
 
 CAPABILITY_NAMES = (
-    "telemetry", "raw_send", "parameter_read", "parameter_write", "open_loop", "motion",
+    "telemetry", "raw_send", "parameter_read", "parameter_write", "open_loop", "motion", "pwm_profile", "encoder_totals",
 )
 
 
@@ -30,6 +30,8 @@ class DeviceCapabilities:
     open_loop: bool = False
     motion: bool = False
     reason: str = "设备尚未声明此能力"
+    pwm_profile: bool = False
+    encoder_totals: bool = False
 
     def supports(self, name: str) -> bool:
         return name in CAPABILITY_NAMES and bool(getattr(self, name))
@@ -172,6 +174,13 @@ class MotionService:
 
     def set_speed(self, left_mm_s: int, right_mm_s: int, duration_ms: int):
         return self.gateway.send_command("set_speed", {"left": left_mm_s, "right": right_mm_s, "duration_ms": duration_ms})
+
+    def query_profile_caps(self):
+        """Explicit read-only discovery; ordinary connection sends only HELLO."""
+        return self.gateway.send_command("query_profile_caps")
+
+    def set_pwm_profile(self, segments):
+        return self.gateway.send_command("set_pwm_profile", {"segments": segments})
 
     def stop(self):
         return self.gateway.send_command("stop")

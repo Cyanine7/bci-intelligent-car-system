@@ -52,6 +52,7 @@ void start_task(void *pvParameters)
     taskENTER_CRITICAL(); //Enter the critical area //进入临界区
 	
     //Create the task //创建任务
+	xTaskCreate(sensor_task,  "sensor_task",  SENSOR_STK_SIZE,  NULL, SENSOR_TASK_PRIO,  NULL);
 	  xTaskCreate(Balance_task,  "Balance_task",  BALANCE_STK_SIZE,  NULL, BALANCE_TASK_PRIO,  NULL);	//Vehicle motion control task //小车运动控制任务
     xTaskCreate(show_task,     "show_task",     SHOW_STK_SIZE,     NULL, SHOW_TASK_PRIO,     NULL); //The OLED display displays tasks //OLED显示屏显示任务
     xTaskCreate(led_task,      "led_task",      LED_STK_SIZE,      NULL, LED_TASK_PRIO,      NULL);	//LED light flashing task //LED灯闪烁任务

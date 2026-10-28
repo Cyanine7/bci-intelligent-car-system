@@ -21,7 +21,8 @@ MAX_WRITE_BYTES = 2 * MAX_MESSAGE_BYTES
 HEARTBEAT_TIMEOUT = 3.0
 METHODS = frozenset({"heartbeat", "get_status", "connect_device", "disconnect_device",
                      "preview_plan", "get_templates", "start_stage", "get_progress",
-                     "add_observation", "stop", "get_results"})
+                     "add_observation", "stop", "get_results", "start_plan",
+                     "get_communication_health", "suggest_refinement", "query_encoder_totals"})
 
 
 @dataclass

@@ -67,6 +67,13 @@ int Read_Encoder(uint8_t timer) {
 }
 uint8_t click_N_Double(uint8_t time) {(void)time; return samples[ix].key;}
 void Project_Stop(uint8_t reason) {stop_called=reason;next_left=next_right=0;}
+static int encoder_sample_calls;
+static int64_t encoder_total_left,encoder_total_right;
+void Project_EncoderSample(uint32_t time,uint32_t interval,int32_t left,int32_t right) {
+    assert(time==samples[ix].time && interval==Encoder_sample_period_ms);
+    assert(left==samples[ix].counts && right==samples[ix].counts);
+    encoder_sample_calls++; encoder_total_left+=left; encoder_total_right+=right;
+}
 void Project_ControlTick(uint32_t time,int allowed) {
     float expected=(float)samples[ix].counts/(float)(Encoder_sample_period_ms);
     assert(time==samples[ix].time);
@@ -101,8 +108,12 @@ static void run(uint32_t initial,const struct sample *values,int n) {
     int i;
     for(i=0;i<n;i++)samples[i]=values[i];
     now=initial;ix=-1;count=n;pwm_calls=0;Time_count=0;Buzzer_count=25;
+    encoder_sample_calls=0;encoder_total_left=encoder_total_right=0;
     if(setjmp(done)==0) Balance_task(0);
     assert(pwm_calls==n+1);
+    assert(encoder_sample_calls==n);
+    {int64_t expected=0;for(i=0;i<n;i++)expected+=values[i].counts;
+     assert(encoder_total_left==expected && encoder_total_right==expected);}
 }
 int main(void) {
     const struct sample timing[]={

@@ -71,6 +71,12 @@ def validate_message(message: dict, *, commands: bool | None = None) -> dict:
             raise IpcError("IPC 时间戳无效")
     if "utc" in message and (not isinstance(message["utc"], str) or len(message["utc"]) > 64):
         raise IpcError("IPC UTC 时间戳无效")
+    if "rx_block_id" in message:
+        block_id = message["rx_block_id"]
+        if type(block_id) is not int or not 1 <= block_id <= 0xFFFFFFFFFFFFFFFF:
+            raise IpcError("IPC RX 块标识无效")
+        if message["kind"] != "rx":
+            raise IpcError("IPC RX 块标识只允许用于接收事件")
     return message
 
 

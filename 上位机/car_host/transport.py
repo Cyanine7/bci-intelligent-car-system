@@ -28,6 +28,9 @@ class IoEvent:
     utc: str = ""
     connection_id: str = ""
     request_id: str = ""
+    rx_block_id: int | None = None
+    parent_read_monotonic: float | None = None
+    worker_enqueued_monotonic: float | None = None
 
 
 def source_for_kind(kind: str) -> str:

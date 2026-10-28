@@ -138,14 +138,17 @@ def test_registration_without_capabilities_defaults_to_disabled():
         create_protocol_adapter(protocol, "SERIAL")
 
 
-def test_default_tools_remain_disabled_with_explanations():
+def test_device_tools_are_gated_but_offline_design_is_available():
     registry = create_default_tool_registry()
     capabilities = capabilities_for_protocol(LEGACY_APP)
-    assert [tool.id for tool in registry.tools()] == ["open_loop", "pid", "motion"]
+    assert [tool.id for tool in registry.tools()] == ["open_loop", "pid", "motion", "encoder", "speed_control"]
     for spec in registry.tools():
         assert spec.id == spec.tool_id
         assert spec.label == spec.title
         available = registry.availability(spec.id, capabilities)
+        if spec.id == "speed_control":
+            assert available.enabled  # Offline model and PI design.
+            continue
         assert not available.enabled and available.reason
         with pytest.raises(RuntimeError, match="LEGACY_APP"):
             registry.create_panel(spec.id, FakeGateway(capabilities))

@@ -102,6 +102,18 @@ def test_stable_identity_gui_thread_and_disconnect(endpoint, qapp):
     assert service.lost == [service.calls[0][2]]
 
 
+def test_encoder_query_is_forwarded_without_motion(endpoint, qapp):
+    bridge, service, saved = endpoint
+    client = link(saved)
+    try:
+        send(client, saved, method="query_encoder_totals")
+        reply = receive(qapp, client)
+        assert reply["result"] == {"ok": True, "method": "query_encoder_totals"}
+        assert [call[0] for call in service.calls] == ["query_encoder_totals"]
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("bad", [b"not-json\n", b"[]\n", b"x" * (MAX_MESSAGE_BYTES + 1)],
                          ids=["invalid_json", "not_object", "oversized"])
 def test_malformed_or_oversized_not_dispatched(endpoint, qapp, bad):

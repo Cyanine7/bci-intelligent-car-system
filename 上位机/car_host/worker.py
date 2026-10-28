@@ -23,6 +23,8 @@ class WorkerInterface(Protocol):
     def request_send(self, payload: bytes, request_id: str = "") -> bool: ...
     def request_stop(self) -> None: ...
     def drain_events(self, max_count: int = 256) -> list[IoEvent]: ...
+    def pull_available_input(self, max_bytes: int = 65536) -> dict: ...
+    def event_queue_snapshot(self) -> dict: ...
     def take_overflow_count(self) -> int: ...
     def isFinished(self) -> bool: ...
 
@@ -57,6 +59,8 @@ class TransportWorker(QThread):
         self._state_lock = threading.Lock()
         self._overflow_lock = threading.Lock()
         self._overflow_count = 0
+        self.overflow_total = 0
+        self._rx_block_sequence = 0
         self._active = False
 
     @property
@@ -110,6 +114,21 @@ class TransportWorker(QThread):
                 break
         return events
 
+    def pull_available_input(self, max_bytes: int = 65536) -> dict:
+        """Transport bytes are already read by the exclusive I/O thread."""
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ValueError("接收字节预算必须为非负整数")
+        return {"bytes_read": 0, "remaining_bytes": 0, "budget_exceeded": False}
+
+    def event_queue_snapshot(self) -> dict:
+        with self._events.mutex:
+            depth = len(self._events.queue)
+            oldest = self._events.queue[0].monotonic if depth else None
+        with self._overflow_lock:
+            overflow = self.overflow_total
+        return {"depth": depth, "oldest_monotonic": oldest, "overflow_total": overflow,
+                "ipc_buffered_bytes": 0}
+
     def take_overflow_count(self) -> int:
         with self._overflow_lock:
             count, self._overflow_count = self._overflow_count, 0
@@ -151,8 +170,10 @@ class TransportWorker(QThread):
                     break
                 phase = "接收"
                 payload = adapter.read(self.MAX_PAYLOAD_BYTES)
+                captured = time.monotonic()
+                captured_utc = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                 if payload:
-                    self._emit("rx", payload=bytes(payload))
+                    self._emit("rx", payload=bytes(payload), monotonic=captured, utc=captured_utc)
                 else:
                     # Protect against a nonblocking adapter/fake busy loop.
                     self._stopping.wait(0.001)
@@ -173,15 +194,21 @@ class TransportWorker(QThread):
             with self._state_lock:
                 self._active = False
 
-    def _emit(self, kind: str, payload: bytes = b"", message: str = "", request_id: str = "") -> None:
+    def _emit(self, kind: str, payload: bytes = b"", message: str = "", request_id: str = "", *,
+              monotonic: float | None = None, utc: str | None = None) -> None:
+        enqueued = time.monotonic()
+        if kind == "rx":
+            self._rx_block_sequence += 1
         event = IoEvent(
             kind=kind,
             payload=payload,
             message=message,
-            monotonic=time.monotonic(),
-            utc=datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            monotonic=enqueued if monotonic is None else monotonic,
+            utc=utc or datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             connection_id=self.connection_id,
             request_id=request_id,
+            rx_block_id=self._rx_block_sequence if kind == "rx" else None,
+            worker_enqueued_monotonic=enqueued,
         )
         try:
             self._events.put_nowait(event)
@@ -195,6 +222,7 @@ class TransportWorker(QThread):
         else:
             with self._overflow_lock:
                 self._overflow_count += 1
+                self.overflow_total += 1
         self._events.put_nowait(event)
 
     def _clear_send_queue(self) -> None:

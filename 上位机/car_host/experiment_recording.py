@@ -12,6 +12,9 @@ import statistics
 import threading
 import time
 
+from .measurement_analysis import compare_controls, summarize_profile, verify_raw_recording, recompute_run
+from .measurement_suite import reserve_suite, finish_suite
+
 
 _MAX_TRIALS = 128
 _MAX_SAMPLES = 256
@@ -26,6 +29,12 @@ _RESULT_FIELDS = (
     "right_observation_delay_ms", "left_tail_mean_mps", "right_tail_mean_mps",
     "left_tail_std_mps", "right_tail_std_mps", "battery_min_mv", "battery_max_mv",
     "software_output_observed", "eligible_sample_count", "observations",
+    "stage_id", "block_id", "slot_id", "origin_slot", "control_type", "segments",
+    "profile_seq", "profile_request_id", "deadline_tick", "profile_metrics", "segment_observations",
+    "profile_segment_observed", "profile_deadline_clipped", "profile_start_tick",
+    "profile_terminated_observed", "conclusion_window_ms", "first_nonzero_output_utc", "first_nonzero_output_tick",
+    "profile_stop_truncated", "profile_termination_reason",
+    "profile_evidence_conflict",
 )
 
 
@@ -128,6 +137,12 @@ def summarize_trial(trial: dict) -> dict:
     row["battery_max_mv"] = max(batteries) if batteries else None
     row["software_output_observed"] = bool(eligible)
     row["eligible_sample_count"] = len(eligible)
+    if trial.get("segments"):
+        row.update(summarize_profile(trial))
+        for side in ("left", "right"):
+            maintenance = row["profile_metrics"][side]["maintenance"]
+            row[f"{side}_feedback"] = {"window_sustained": "sustained", "window_not_sustained": "not_sustained",
+                                       "not_tested": "not_tested"}.get(maintenance, "insufficient")
     return row
 
 
@@ -179,6 +194,12 @@ class ExperimentJournal:
             ("plan", "plan.json"), ("context", "context.json"), ("events", "events.jsonl"),
             ("observations", "observations.jsonl"), ("results", "results.csv"),
             ("report", "report.md"), ("curve", "speed_curve.svg"), ("summary", "summary.json"))}
+        if self.plan.get("schema_version") == 2:
+            self._artifacts["verification"] = str(self.directory / "verification.json")
+            self._artifacts["recompute"] = str(self.directory / "recompute.json")
+            self._artifacts["segments"] = str(self.directory / "segments.csv")
+            if self.context.get("suite_directory"):
+                self._artifacts["suite_index"] = str(Path(self.context["suite_directory"]) / "index.json")
         self._thread = threading.Thread(target=self._run, name="car-experiment-journal", daemon=True)
         self._thread.start()
 
@@ -306,6 +327,9 @@ class ExperimentJournal:
             self._write_document("plan", self.plan)
             self._write_document("context", {**self.context, "run_id": self.run_id,
                                              "stage_id": self.stage_id, "captured_utc": _utc()})
+            if self.context.get("suite_directory"):
+                reserve_suite(self.context["suite_directory"], self.plan["suite"], self.run_id,
+                              self.plan, self.context["planned_slots"], self._artifacts)
             with Path(self._artifacts["observations"]).open("a", encoding="utf-8"):
                 pass
             with Path(self._artifacts["events"]).open("x", encoding="utf-8") as handle:
@@ -329,6 +353,9 @@ class ExperimentJournal:
                                              status=payload["status"], reason=payload["reason"],
                                              failure=self.failure), ensure_ascii=False) + "\n")
             self._write_report(payload)
+            if self.context.get("suite_directory"):
+                finish_suite(self.context["suite_directory"], self.run_id, payload["trials"],
+                             "failed" if self.failure else payload["status"])
         except Exception as exc:
             self._fail(f"实验记录写入失败：{exc}")
             with self._lock:
@@ -340,6 +367,30 @@ class ExperimentJournal:
     def _write_report(self, payload):
         trials = payload["trials"]
         rows = [summarize_trial(trial) for trial in trials]
+        v2 = self.plan.get("schema_version") == 2
+        verification = None
+        if v2:
+            compare_controls(rows)
+            verification = verify_raw_recording(self.directory, trials)
+            independently_classified = recompute_run(self.directory, saved_rows=rows)
+            verification.update(classification_verified=independently_classified["verified"],
+                classification_mismatch_count=independently_classified["classification_mismatch_count"])
+            verification["verified"] = verification["verified"] and independently_classified["verified"]
+            self._write_document("verification", verification)
+            if not verification["verified"]:
+                self._fail("独立原始CRC/CSV/字段校核失败；不发布成功结论")
+                payload["status"] = "failed"
+                with self._lock:
+                    self._status = "failed"
+            with Path(self._artifacts["segments"]).open("x", encoding="utf-8-sig", newline="") as handle:
+                fields = ("trial_id", "block_id", "profile_seq", "segment_index", "sample_count", "observed_span_ms",
+                          "actual_start_tick", "planned_start_offset_ms", "actual_start_offset_ms", "largest_gap_ms",
+                          "observation_sufficient", "pwm_matches_plan")
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                for row in rows:
+                    for segment in row.get("segment_observations") or []:
+                        writer.writerow({k: (row.get(k) if k in ("trial_id", "block_id", "profile_seq") else segment.get(k)) for k in fields})
         with Path(self._artifacts["results"]).open("x", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=_RESULT_FIELDS)
             writer.writeheader()
@@ -358,6 +409,16 @@ class ExperimentJournal:
                        success_rate_basis="仅已完成且观测充分的受测轮试次；中止/失败、观测不足和未测试排除",
                        observation_delay="优先相对pwm_started_monotonic，缺失则相对started_monotonic；使用接收时间",
                        later_observations="后补观察见 observations.jsonl，原报告不重写")
+        if v2:
+            entered = {t["trial_id"] for t in trials}
+            slots = self.context.get("planned_slots", [])
+            summary.update(schema_version=2, planned_count=len(slots), entered_count=len(trials),
+                completed_count=sum(t["status"] == "completed" for t in trials),
+                aborted_count=sum(t["status"] == "aborted" for t in trials),
+                cancelled_slots=[s for s in slots if s["trial_id"] not in entered],
+                independent_verification=verification, blocks=_block_metrics(rows),
+                conclusion="仅有限窗口分段观察；对照比较不提供稳态、负载或可靠性保证",
+                metric="启动段末4条至少3条同向；两段各至少4点、跨度不少于段时长减150ms且最大间隔100ms；维持末4条兼容指标与惯性对照分列")
         self._write_document("summary", dict(summary, rows=rows))
         with self._lock:
             observations = _json_value(self._observations)
@@ -410,10 +471,27 @@ class ExperimentJournal:
                   "CAPS、实际 RAM 参数和时间快照见 context.json；不由本地产物推定当前固件散列。",
                   "人工与助手观察分开标注来源，见 observations.jsonl；生成后的补充观察不回写本报告。", "",
                   "![有符号轮速观测](speed_curve.svg)", ""]
+        if v2:
+            report.extend(["## 分段证据与600ms有限窗口", "",
+                "profile ACK仅证明整表接受。分段身份、实际切换tick和观察跨度见segments.csv；PWM0段保留速度与零反馈。",
+                "启动未成立、第二段未出现、截止截短及观测不足分别记录，不计为充分观察的维持失败。",
+                "同块同条件至少3次高PWM保持及3次PWM0对照才比较；尾4兼容指标不能单独排除惯性。",
+                "使能PWM模式中的软件PWM0不等于断电或自由滑行；device tick时间轴不等于机械停时。", "",
+                "|试次|时间块|启动/维持左|启动/维持右|惯性对照结论左/右|",
+                "|---|---|---|---|---|", *[
+                    f"|{_cell(r['trial_id'])}|{_cell(r.get('block_id'))}|"
+                    f"{_cell(r['profile_metrics']['left']['startup'])}/{_cell(r['profile_metrics']['left']['maintenance'])}|"
+                    f"{_cell(r['profile_metrics']['right']['startup'])}/{_cell(r['profile_metrics']['right']['maintenance'])}|"
+                    f"{_cell(r['profile_metrics']['left'].get('inertia_conclusion'))}/{_cell(r['profile_metrics']['right'].get('inertia_conclusion'))}|"
+                    for r in rows if r.get("segments")], "", "## 原始记录独立校核", "", "```json",
+                json.dumps(verification, ensure_ascii=False, indent=2), "```", "",
+                f"计划槽位{len(self.context.get('planned_slots', []))}；实际进入{len(trials)}；完成{summary['completed_count']}；"
+                f"中止{summary['aborted_count']}；取消{len(summary['cancelled_slots'])}。", "",
+                "每块侧别、方向、对照与实际分母见summary.json；合并成功率仅为辅助统计。"])
         with Path(self._artifacts["report"]).open("x", encoding="utf-8") as handle:
             handle.write("\n".join(report))
         with Path(self._artifacts["curve"]).open("x", encoding="utf-8") as handle:
-            handle.write(_speed_svg(trials))
+            handle.write(_profile_speed_svg(trials) if any(t.get("segments") for t in trials) else _speed_svg(trials))
         with self._lock:
             self._summary = summary
 
@@ -492,5 +570,65 @@ def _speed_svg(trials):
                 coordinates = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
                 elements.append(f'<polyline points="{coordinates}" fill="none" stroke="{color}" stroke-width="2"/>')
                 elements.extend(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2" fill="{color}"/>' for x, y in points)
+    elements.append("</svg>")
+    return "\n".join(elements)
+
+
+def _block_metrics(rows):
+    groups = {}
+    for row in rows:
+        for side in ("left", "right"):
+            if row.get("segments"):
+                start, hold = row["segments"]
+                pwm = start[f"{side}_pwm"]
+                key = (row.get("block_id"), row.get("connection_id"), row.get("session"), side, 1 if pwm > 0 else -1 if pwm < 0 else 0,
+                       row.get("control_type"), start["duration_ms"], hold["duration_ms"], hold[f"{side}_pwm"])
+            else:
+                pwm = row.get(f"{side}_pwm") or 0
+                key = (row.get("block_id"), row.get("connection_id"), row.get("session"), side, 1 if pwm > 0 else -1 if pwm < 0 else 0,
+                       "fixed_pwm", 0, row.get("duration_ms"), pwm)
+            entries = groups.setdefault(key, [])
+            entries.append(row)
+    result = []
+    for key, entries in groups.items():
+        block, connection, session, side, direction, control, startup_ms, hold_ms, pwm = key
+        feedback = [r[f"{side}_feedback"] for r in entries if r["status"] == "completed"]
+        success, failure = feedback.count("sustained"), feedback.count("not_sustained")
+        result.append(dict(block_id=block, connection_id=connection, session=session, side=side, direction=direction, control_type=control,
+            startup_ms=startup_ms, observation_ms=hold_ms, pwm=pwm, entered_count=len(entries),
+            completed_count=sum(r["status"] == "completed" for r in entries), success_count=success,
+            failure_count=failure, valid_count=success + failure,
+            insufficient_count=feedback.count("insufficient"), success_rate=success / (success + failure) if success + failure else None))
+    return result
+
+
+def _profile_speed_svg(trials):
+    width, panel_height = 900, 160
+    height = max(1, len(trials)) * panel_height + 40
+    elements = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white"/>',
+        '<text x="20" y="24" font-family="sans-serif" font-size="16">分段有符号轮速；横轴=同会话device tick相对profile起点ms；蓝=左，橙=右</text>']
+    for index, trial in enumerate(trials):
+        top = 42 + index * panel_height
+        samples = [s for s in trial.get("samples", []) if s.get("profile_seq") == trial.get("profile_seq")
+            and type(s.get("profile_start_tick")) is int and type(s.get("device_time_ms")) is int]
+        origin = samples[0]["profile_start_tick"] if samples else 0
+        samples = [s for s in samples if ((s["device_time_ms"] - origin) & 0xffffffff) < 5000]
+        end = max([trial["duration_ms"], *[((s["device_time_ms"] - origin) & 0xffffffff) for s in samples]])
+        scale = max([.05, *[abs(s[k]) for s in samples for k in ("signed_left_speed_mps", "signed_right_speed_mps") if _number(s.get(k))]])
+        elements.extend([f'<text x="20" y="{top + 15}" font-family="sans-serif" font-size="13">{html.escape(str(trial.get("trial_id")))} · {html.escape(str(trial.get("block_id")))}</text>',
+            f'<path d="M70 {top + 30} V{top + 125} H870 M70 {top + 78} H870" fill="none" stroke="#aaa"/>'])
+        actual = next((s.get("segment1_actual_tick") for s in samples if s.get("segment_index") == 1), None)
+        if actual is not None:
+            x = 70 + 800 * ((actual - origin) & 0xffffffff) / end
+            elements.append(f'<path d="M{x:.1f} {top + 25} V{top + 125}" stroke="#7c3aed" stroke-dasharray="4 3"/>')
+        for key, color in (("signed_left_speed_mps", "#2563eb"), ("signed_right_speed_mps", "#d97706")):
+            points = [(70 + 800 * ((s["device_time_ms"] - origin) & 0xffffffff) / end,
+                       top + 78 - 40 * s[key] / scale) for s in samples if _number(s.get(key))]
+            if points:
+                coordinates = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+                elements.append(f'<polyline points="{coordinates}" fill="none" stroke="{color}" stroke-width="2"/>')
+                elements.extend(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2" fill="{color}"/>' for x, y in points)
+        elements.append(f'<text x="700" y="{top + 145}" font-family="sans-serif" font-size="12">窗口{trial["duration_ms"]}ms；显示至{end}ms</text>')
     elements.append("</svg>")
     return "\n".join(elements)

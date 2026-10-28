@@ -100,6 +100,8 @@ void Balance_task(void *pvParameters)
         Encoder_sample_period_ms = elapsed_ms ? elapsed_ms : 1U;
         if(Time_count < 3000) Time_count++;
         Get_Velocity_From_Encoder();
+        Project_EncoderSample(now_ms, Encoder_sample_period_ms,
+                              OriginalEncoder.A, -OriginalEncoder.B);
         local_allowed = (Turn_Off(Voltage) == 0);
 
         /* Do not execute catch-up control ticks after a scheduler overrun. */

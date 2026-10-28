@@ -60,12 +60,14 @@ Output  : none
 **************************************************************************/
 void oled_show(void)
 {
+    SensorSnapshot imu;
+    char imu_line[17];
+    const char *imu_status;
     int voltage_cv = (int)(Voltage * 100.0f);
     int left_mm_s = (int)(MOTOR_A.Encoder * 1000.0f);
     int right_mm_s = (int)(MOTOR_B.Encoder * 1000.0f);
 
     /* Display the model selected at boot, not a live potentiometer guess. */
-    OLED_ShowString(0, 0, (const u8*)(Car_Mode == Akm_Car ? "Akm PWM  mm/s" : "Diff PWM mm/s"));
     OLED_ShowString(0, 10, "L:");
     OLED_ShowString(15, 10, (const u8*)(MOTOR_A.Motor_Pwm < 0 ? "-" : "+"));
     OLED_ShowNumber(20, 10, myabs((long)MOTOR_A.Motor_Pwm), 5, 12);
@@ -76,19 +78,31 @@ void oled_show(void)
     OLED_ShowNumber(20, 20, myabs((long)MOTOR_B.Motor_Pwm), 5, 12);
     OLED_ShowString(60, 20, (const u8*)(right_mm_s < 0 ? "-" : "+"));
     OLED_ShowNumber(75, 20, myabs(right_mm_s), 5, 12);
-    if(Car_Mode == Akm_Car)
+    sensor_get_snapshot(&imu);
+    if (imu_init_status != 0) imu_status = "ERR";
+    else if (!imu.has_sample) imu_status = "WAIT";
+    else if ((uint32_t)(getSysTickCnt() - imu.tick_ms) > 200u) imu_status = "OLD";
+    else imu_status = imu.calibrated ? "OK" : "CAL";
+    snprintf(imu_line, sizeof(imu_line), "%s IMU:%-4s  ",
+             Car_Mode == Akm_Car ? "Akm " : "Diff", imu_status);
+    OLED_ShowString(0, 0, (const u8*)imu_line);
+    if (imu_init_status == 0 && imu.has_sample &&
+        (uint32_t)(getSysTickCnt() - imu.tick_ms) <= 200u)
     {
-        OLED_ShowString(0, 30, "SERVO:");
-        OLED_ShowNumber(50, 30, myabs(Servo), 4, 12);
+        long yaw_cdeg = (long)(imu.attitude.yaw * 100.0f);
+        long gyro_mrad = (long)(imu.gyro_z_rad_s * 1000.0f);
+        long yaw_abs = myabs(yaw_cdeg), gyro_abs = myabs(gyro_mrad);
+        snprintf(imu_line, sizeof(imu_line), "Yaw:%c%3ld.%02lddeg ",
+                 yaw_cdeg < 0 ? '-' : '+', yaw_abs / 100, yaw_abs % 100);
+        OLED_ShowString(0, 30, (const u8*)imu_line);
+        snprintf(imu_line, sizeof(imu_line), "Gz :%c%2ld.%03ldrad ",
+                 gyro_mrad < 0 ? '-' : '+', gyro_abs / 1000, gyro_abs % 1000);
+        OLED_ShowString(0, 40, (const u8*)imu_line);
     }
     else
     {
-        OLED_ShowString(0, 30, "MA:");
-        OLED_ShowString(30, 30, (const u8*)(MOTOR_A.Motor_Pwm < 0 ? "-" : "+"));
-        OLED_ShowNumber(40, 30, myabs((long)MOTOR_A.Motor_Pwm), 5, 12);
-        OLED_ShowString(0, 40, "MB:");
-        OLED_ShowString(30, 40, (const u8*)(MOTOR_B.Motor_Pwm < 0 ? "-" : "+"));
-        OLED_ShowNumber(40, 40, myabs((long)MOTOR_B.Motor_Pwm), 5, 12);
+        OLED_ShowString(0, 30, "Yaw: ---        ");
+        OLED_ShowString(0, 40, "Gz : ---        ");
     }
     /* EN is the physical switch, independent of protocol arming. */
     OLED_ShowString(0, 50, "EN:");

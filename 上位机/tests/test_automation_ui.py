@@ -62,6 +62,9 @@ def test_pause_display_keeps_automation_raw_recording_independent(automation, qa
         drive(automation, lambda: service.status()["phase"] == "moving")
         window.log_pause.setChecked(True)
         window.plot_pause.setChecked(True)
+        window.showMinimized()
+        qapp.processEvents()
+        assert window.isMinimized()
         frozen_logs = window.log_view.toPlainText()
         frozen_curve = window.left_curve.xData.copy()
         frames_before = host.frames_received
@@ -78,6 +81,7 @@ def test_pause_display_keeps_automation_raw_recording_independent(automation, qa
         assert "INTEGRITY" in (directory / "communication.log").read_text(encoding="utf-8")
         window.log_pause.setChecked(False)
         window.plot_pause.setChecked(False)
+        window.showNormal()
         assert window.log_view.toPlainText() != frozen_logs
         assert window.left_curve.xData.size > frozen_curve.size
     finally:
