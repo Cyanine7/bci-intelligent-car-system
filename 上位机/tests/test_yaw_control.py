@@ -117,7 +117,7 @@ def test_fake_full_capture_ui_gate_and_export(speed_host,qapp):
             for tab,name in ((1,'outer_pi'),(2,'controls'),(3,'curves')):
                 p.tabs.setCurrentIndex(tab);qapp.processEvents()
                 assert window.grab().save(str(assets/f'yaw_{name}_{width}.png'))
-        window.connection_shortcut.click();assert window.workspace_tabs.currentIndex()==3
+        window.connection_shortcut.click();assert window.workspace_tabs.tabText(window.workspace_tabs.currentIndex())=='设备与调试'
         h.worker.faults['yaw_missing_index']=0
         assert s.download().success
         for _ in range(55):advance()

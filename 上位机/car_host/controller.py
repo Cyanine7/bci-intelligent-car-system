@@ -25,6 +25,8 @@ from .project_protocol import (PROJECT_V1, ProjectV1Adapter, CAPS, ACK, PARAMS, 
 from .encoder_totals import EncoderTotalsService
 from .speed_control_service import SpeedControlService
 from .yaw_service import YawService
+from .continuous_service import ContinuousService
+from .continuous_models import COMMANDS as CONT_COMMANDS
 from .yaw_models import COMMANDS as YAW_COMMANDS
 from .speed_control_models import SPEED_COMMANDS, SPEED_DIAG
 from .receive_health import ReceiveHealth, rx_metadata, rx_trace
@@ -79,6 +81,7 @@ class HostController(QObject):
         self.encoder_totals = EncoderTotalsService(self)
         self.speed_control = SpeedControlService(self)
         self.yaw_control = YawService(self)
+        self.continuous_control = ContinuousService(self)
         self.latest_encoder_totals = None
         self.encoder_status = "尚未查询全量编码器能力"
         self.protocol_status = "未连接"
@@ -194,6 +197,7 @@ class HostController(QObject):
         self.encoder_totals.invalidate("连接改变，手动计数基线失效")
         self.speed_control.reset()
         self.yaw_control.reset()
+        self.continuous_control.reset()
         self.command_metadata.clear()
         self.caps_received_utc = self.parameters_received_utc = None
         self._project_pending.clear()
@@ -229,6 +233,7 @@ class HostController(QObject):
         return True
 
     def disconnect_device(self) -> None:
+        self.continuous_control.cancel("连接已关闭")
         self.speed_control.download_running = False
         self.yaw_control.download_running = False
         if self.automation_service is not None and self.automation_service.active:
@@ -354,7 +359,7 @@ class HostController(QObject):
                      payload=payload, direction="QUEUED", request_id=request_id)
         self.recorder.record_trace(dict(kind="command_queued", connection_id=self.connection_id,
                                        request_id=request_id, **self.command_metadata[request_id]))
-        if command in ("arm_pwm", "arm_speed", "set_pwm", "set_speed", "set_pwm_profile", "stop", "speed_arm", "speed_run", "speed_arm_pwm", "speed_pwm", "yaw_arm", "yaw_run"):
+        if command in ("arm_pwm", "arm_speed", "set_pwm", "set_speed", "set_pwm_profile", "stop", "speed_arm", "speed_run", "speed_arm_pwm", "speed_pwm", "yaw_arm", "yaw_run", "continuous_arm", "continuous_target"):
             self._supersede_stop_observations(command, seq, queued_monotonic)
         if command == "stop":
             self.speed_control.download_running = False
@@ -363,7 +368,7 @@ class HostController(QObject):
                 session=self.adapter.session, seq=seq, queued_monotonic=queued_monotonic)
             while len(self._stop_observations) > 32:
                 del self._stop_observations[next(iter(self._stop_observations))]
-        if command in ("arm_pwm", "arm_speed", "set_pwm", "set_speed", "set_pwm_profile", "speed_arm", "speed_run", "speed_arm_pwm", "speed_pwm", "yaw_arm", "yaw_run"):
+        if command in ("arm_pwm", "arm_speed", "set_pwm", "set_speed", "set_pwm_profile", "speed_arm", "speed_run", "speed_arm_pwm", "speed_pwm", "yaw_arm", "yaw_run", "continuous_arm"):
             self._state_required_seq = seq
         if command in ("set_pwm", "set_speed", "set_pwm_profile", "speed_run", "speed_pwm", "yaw_run"):
             self._motion_latched_seq = seq
@@ -381,6 +386,7 @@ class HostController(QObject):
         if command != "stop" and not self.capabilities.supports(requirement):
             return DeviceResult(False, "unsupported", self.capabilities.reason_for(requirement))
         if command == "stop":
+            self.continuous_control.cancel("STOP", send_stop=False)
             existing = next((p for p in self._project_pending.values() if p["command"] == "stop"), None)
             if existing is not None:
                 return DeviceResult(True, "queued", "STOP 已排队，等待 MCU ACK 与 STATE；不会重复发送", existing["request_id"])
@@ -400,6 +406,18 @@ class HostController(QObject):
         elif len(self._project_pending) >= 32:
             return DeviceResult(False, "rejected", "语义请求已达 32 项上限，请等待结果")
         values = dict(values or {})
+        if command in CONT_COMMANDS:
+            try:
+                values = self.continuous_control.prepare(command, values)
+                payload = self.adapter.encode_command(command, values)
+            except (ValueError, TypeError, KeyError) as exc:
+                return DeviceResult(False, "rejected", str(exc))
+            result = self._queue_project(command, payload, values)
+            if command == 'continuous_arm' and result.success:
+                self._state_required_seq = self.adapter.seq
+            if command == 'continuous_target' and result.success:
+                self._motion_latched_seq = self.adapter.seq
+            return result
         if command in YAW_COMMANDS:
             try:
                 values = self.yaw_control.prepare(command, values)
@@ -490,6 +508,7 @@ class HostController(QObject):
     def _begin_project_session(self):
         self.speed_control.reset()
         self.yaw_control.reset()
+        self.continuous_control.reset()
         payload = self.adapter.begin_session()
         self.latest = None
         self.receive_health.begin_epoch(self.connection_id, self.adapter.session,
@@ -500,6 +519,10 @@ class HostController(QObject):
 
     def _handle_project_events(self, received_monotonic=None):
         for event in self.adapter.pop_events():
+            if event.kind == 0x9a:
+                try:self.continuous_control.diagnostic(event)
+                except ValueError as exc:self.add_log(str(exc), "WARNING")
+                continue
             if event.kind in (0x97, 0x98):
                 try:self.yaw_control.diagnostic(event)
                 except ValueError as exc:self.add_log(str(exc), "WARNING")
@@ -515,6 +538,10 @@ class HostController(QObject):
                 self.add_log(f"忽略未关联或已超时的回包 seq={event.seq}", "WARNING")
                 continue
             command = pending["command"]
+            if command in CONT_COMMANDS:
+                try:self.continuous_control.handle(event, pending)
+                except (ValueError, KeyError, TypeError) as exc:self.add_log(str(exc), "WARNING")
+                continue
             if command in YAW_COMMANDS:
                 try:self.yaw_control.handle(event, pending)
                 except (ValueError, KeyError, TypeError) as exc:self.add_log(str(exc), "WARNING")
@@ -1086,6 +1113,7 @@ class HostController(QObject):
         self._expire_project_requests(now)
         self.speed_control.poll()
         self.yaw_control.poll()
+        self.continuous_control.poll()
         self.history.prune(now)
         while self.frame_times and self.frame_times[0] < now - 2.0:
             self.frame_times.popleft()

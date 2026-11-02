@@ -1,6 +1,7 @@
 #include "project_link.h"
 #include "speed_experiment.h"
 #include "yaw_control.h"
+#include "continuous_control.h"
 #include <string.h>
 
 /* Portable protocol/control core; only the board adapter touches registers. */
@@ -87,6 +88,7 @@ void Project_Stop(uint8_t reason)
 {
     SpeedExperiment_Stop(control_now,reason);
     YawExperiment_Stop(control_now,reason);
+    Continuous_Stop();
     if(profile_status==1) profile_status=2;
     profile_second[0]=profile_second[1]=0;
     armed=mode=active=0;
@@ -223,6 +225,7 @@ static void dispatch(uint32_t now)
                 encoder_enabled=0; encoder_report_seq=0;
                 SpeedExperiment_ResetSession();
                 YawExperiment_ResetSession();
+                Continuous_ResetSession();
                 profile_enabled=0; clear_profile(); capabilities(seq);
             }
         }
@@ -240,9 +243,15 @@ static void dispatch(uint32_t now)
         status=SpeedExperiment_Busy()?4:YawExperiment_Command(type,p,length,now,seq,armed);
         acknowledge(type,status,identity,seq); return;
     }
+    if(type==28 || type==29) {
+        if(type==29 && !local_ok)status=5;
+        else status=Continuous_Command(type,p,length,now,seq,type==28?armed:(armed && mode==6),&end_tick);
+        if(type==29 && !status)active=1;
+        acknowledge(type,status,identity,seq);return;
+    }
     switch(type) {
     case 2:
-        if(length!=1 || (p[0]!=1 && p[0]!=2 && p[0]!=3 && p[0]!=4 && p[0]!=5)) { status=1; break; }
+        if(length!=1 || (p[0]!=1 && p[0]!=2 && p[0]!=3 && p[0]!=4 && p[0]!=5 && p[0]!=6)) { status=1; break; }
         if(SpeedExperiment_Busy() || YawExperiment_Busy()) { status=4; break; }
         if(p[0]==5 && !YawExperiment_ArmAllowed(now)) { status=7; break; }
         if((p[0]==3 || p[0]==4) && !SpeedExperiment_Negotiated()) { status=9; break; }
@@ -250,7 +259,9 @@ static void dispatch(uint32_t now)
         if(!local_ok) { status=5; break; }
         if(armed) { status=4; break; }
         if(p[0]==2 && (!(gains[0]||gains[1]) || !(gains[2]||gains[3]))) { status=7; break; }
-        Project_Stop(0); clear_profile(); mode=p[0]; armed=1; idle_end_tick=now+5000; break;
+        Project_Stop(0); clear_profile();
+        if(p[0]==6 && !Continuous_Arm(now)) { status=7;break; }
+        mode=p[0]; armed=1; idle_end_tick=now+(mode==6?CONTINUOUS_LEASE_MS:5000); break;
     case 24:
         if(!local_ok) { status=5; break; }
         if(!armed || active || mode!=5) { status=4; break; }
@@ -426,6 +437,8 @@ void Project_ControlTick(uint32_t now, int local_allowed)
 
     if(!YawExperiment_Tick(now,encoder_interval,armed && active && mode==5,
         &outputs[0],&outputs[1]))Project_Stop(6);
+    if(!Continuous_Tick(now,encoder_interval,armed && active && mode==6,
+        &outputs[0],&outputs[1]))Project_Stop(6);
     SpeedExperiment_Pump();
     YawExperiment_Pump();
 
@@ -434,6 +447,7 @@ void Project_ControlTick(uint32_t now, int local_allowed)
         if(encoder_enabled) encoder_state();
         SpeedExperiment_Report();
         YawExperiment_Report();
+        Continuous_Report();
     }
 
     if(overflow) Project_Stop(4);

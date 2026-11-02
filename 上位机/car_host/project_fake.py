@@ -84,6 +84,8 @@ class ProjectFakeWorker:
         self.speed = FakeSpeedDevice(self)
         from .yaw_fake import FakeYawDevice
         self.yaw = FakeYawDevice(self)
+        from .continuous_fake import FakeContinuousDevice
+        self.continuous = FakeContinuousDevice(self)
 
     def start(self):
         if self._running:
@@ -165,10 +167,12 @@ class ProjectFakeWorker:
                 self.segment1_actual_tick = self.tick_ms
             self.speed.tick()
             self.yaw.tick()
+            self.continuous.tick()
             if self.session and self._tick_number % self.STATE_TICKS == 0 and not self.faults.get("stale"):
                 self._state(min(now, self._last_time))
                 self.speed.report(min(now, self._last_time))
                 self.yaw.report(min(now, self._last_time))
+                self.continuous.report(min(now, self._last_time))
                 if self._encoder_enabled:
                     self._encoder_report_seq = (self._encoder_report_seq + 1) & 0xffffffff
                     self._emit("rx", encode_frame(ENCODER_TOTALS, self.session, self._encoder_report_seq,
@@ -209,6 +213,7 @@ class ProjectFakeWorker:
             self._sessions.add(session)
             self.speed.reset_session()
             self.yaw.reset_session()
+            self.continuous.reset_session()
             self.session, self.seq = session, seq
             self._stop(0)
             self._profile_enabled = False
@@ -233,6 +238,8 @@ class ProjectFakeWorker:
     def _execute(self, kind, body):
         if self._fault_matches("reject", kind):
             return 5
+        if kind in (28,29) or (kind==ARM and body==b'\x06'):
+            return self.continuous.execute(kind,body)
         if kind in range(19,28) or (kind==ARM and body==b'\x05'):
             return self.yaw.execute(kind,body)
         if kind in range(11,19) or (kind==ARM and body in (b'\x03',b'\x04')):
@@ -367,7 +374,9 @@ class ProjectFakeWorker:
     def _state(self, now):
         left = 0 if self.faults.get("start_failure") else int(self.pwm_left / 10)
         right = 0 if self.faults.get("start_failure") else int(self.pwm_right / 10)
-        if self.yaw.negotiated and self.mode==5:
+        if self.continuous.negotiated and self.mode==6:
+            left,right=(int(x*1000) for x in self.continuous.measured)
+        elif self.yaw.negotiated and self.mode==5:
             left,right=(int(x*1000) for x in self.yaw.measured)
         elif self.speed.negotiated and self.mode not in (1,2):
             left,right=(int(x*1000) for x in self.speed.measured)
@@ -388,6 +397,8 @@ class ProjectFakeWorker:
         return ((self.tick_ms - deadline) & 0xFFFFFFFF) < 0x80000000
 
     def _stop(self, reason):
+        if hasattr(self, 'continuous'):
+            self.continuous.stop()
         if hasattr(self,'speed'):
             self.speed.stop(reason)
         if hasattr(self, "yaw"):

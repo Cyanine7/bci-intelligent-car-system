@@ -435,7 +435,7 @@ def test_task_navigation_and_offline_speed_design(fake_workbench, qapp, size):
     window.resize(*size)
     qapp.processEvents()
     tabs = window.workspace_tabs
-    assert [tabs.tabText(i) for i in range(tabs.count())] == ['实时监测', '速度环实验', '角速度环实验', '设备与调试']
+    assert [tabs.tabText(i) for i in range(tabs.count())] == ['实时监测', '速度环实验', '角速度环实验', '连续控制', '设备与调试']
     assert tabs.currentIndex() == 0
     assert window.connect_button.isVisible() and window.stop_button.isVisible()
     assert not window.kind_combo.isVisible() and not window.send_editor.isVisible()
@@ -454,7 +454,7 @@ def test_task_navigation_and_offline_speed_design(fake_workbench, qapp, size):
     assert gain > 0
     window.connection_shortcut.click()
     qapp.processEvents()
-    assert tabs.currentIndex() == 3 and window.bluetooth_panel.isVisible()
+    assert tabs.tabText(tabs.currentIndex()) == '设备与调试' and window.bluetooth_panel.isVisible()
     assert window.connect_button.isVisible() and window.stop_button.isVisible()
     window.tool_buttons['speed_control'].click()
     assert tabs.currentIndex() == 1 and window.speed_panel is panel

@@ -619,15 +619,20 @@
               <FileType>1</FileType>
               <FilePath>..\BALANCE\speed_experiment.c</FilePath>
             </File>
-<File>
+            <File>
               <FileName>yaw_control.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\BALANCE\yaw_control.c</FilePath>
             </File>
-<File>
+            <File>
               <FileName>yaw_experiment.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\BALANCE\yaw_experiment.c</FilePath>
+            </File>
+            <File>
+              <FileName>continuous_control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BALANCE\continuous_control.c</FilePath>
             </File>
             <File>
               <FileName>project_board.c</FileName>

@@ -90,7 +90,7 @@ class MainWindow(QMainWindow):
         heading = QVBoxLayout()
         title = QLabel("小车调试工作台")
         title.setObjectName("title")
-        subtitle = QLabel("实时监测 · 速度环实验 · 角速度环实验 · 设备与调试")
+        subtitle = QLabel("实时监测 · 速度环实验 · 角速度环实验 · 连续控制 · 设备与调试")
         subtitle.setObjectName("subtitle")
         heading.addWidget(title)
         heading.addWidget(subtitle)
@@ -126,6 +126,9 @@ class MainWindow(QMainWindow):
         self.yaw_page_layout.setContentsMargins(0, 6, 0, 0)
         self.yaw_panel = None
         self.workspace_tabs.addTab(self.yaw_page, "角速度环实验")
+        from .continuous_panel import ContinuousPanel
+        self.continuous_panel = ContinuousPanel(controller, self)
+        self.workspace_tabs.addTab(self.continuous_panel, "连续控制")
         device = QWidget()
         device_layout = QVBoxLayout(device)
         device_layout.addWidget(connection_settings)
@@ -136,7 +139,7 @@ class MainWindow(QMainWindow):
         device_scroll.setFrameShape(QFrame.Shape.NoFrame)
         device_scroll.setWidget(device)
         self.workspace_tabs.addTab(device_scroll, "设备与调试")
-        self.connection_shortcut.clicked.connect(lambda: self.workspace_tabs.setCurrentIndex(3))
+        self.connection_shortcut.clicked.connect(lambda: self.workspace_tabs.setCurrentWidget(device_scroll))
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
         if controller.automation_service is not None:
             bar = QHBoxLayout()
@@ -176,7 +179,7 @@ class MainWindow(QMainWindow):
         vertical.addWidget(self._build_log_panel())
         vertical.setSizes([530, 220])
         monitor_layout.addWidget(vertical, 1)
-        self.statusBar().showMessage("速度环与角速度环：模型、PI设计、有限两段实验和曲线；连接设置在“设备与调试”。")
+        self.statusBar().showMessage("速度环、角速度环与连续键盘控制；连接设置在“设备与调试”。")
 
         self.controller.changed.connect(self.refresh_state)
         self.controller.log_added.connect(self._append_log)
@@ -705,7 +708,7 @@ class MainWindow(QMainWindow):
         if self._closing:
             return
         if tool_id == "speed_control":
-            self.workspace_tabs.setCurrentIndex(1)
+            self.workspace_tabs.setCurrentWidget(self.speed_page)
             return
         existing = self._tool_windows.get(tool_id)
         if existing is not None:
@@ -732,12 +735,15 @@ class MainWindow(QMainWindow):
             self.controller.add_log(f"功能面板无法打开：{exc}", "ERROR")
 
     def _workspace_changed(self, index: int) -> None:
-        if index == 2 and self.yaw_panel is None and not self._closing:
+        page = self.workspace_tabs.widget(index)
+        if page is not self.continuous_panel:
+            self.controller.continuous_control.cancel('已切换工作页，已STOP')
+        if page is self.yaw_page and self.yaw_panel is None and not self._closing:
             from .yaw_panel import YawPanel
             self.yaw_panel = YawPanel(self.controller)
             self.yaw_page_layout.addWidget(self.yaw_panel)
             return
-        if index != 1 or self.speed_panel is not None or self._closing:
+        if page is not self.speed_page or self.speed_panel is not None or self._closing:
             return
         from .speed_control_panel import SpeedControlPanel
         self.speed_panel = SpeedControlPanel(self.controller)
@@ -952,6 +958,7 @@ class MainWindow(QMainWindow):
         panel.activateWindow()
 
     def closeEvent(self, event) -> None:
+        self.controller.continuous_control.cancel('窗口关闭，已STOP')
         if not self._closing and not self._close_ready:
             self.connection_interacted.emit()
         if self._close_ready or self.controller.shutdown():

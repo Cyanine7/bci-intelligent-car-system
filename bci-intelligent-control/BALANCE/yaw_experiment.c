@@ -55,6 +55,11 @@ int YawExperiment_ArmAllowed(uint32_t now)
  return negotiated && configured && !YawExperiment_Busy() && calibration==2 &&
  Project_ReadGyro(&raw,&seq,&tick) && finite_value(raw) && (uint32_t)(now-tick)<=60U;
 }
+int YawExperiment_ControlSnapshot(uint32_t now,YawConfig *yc,SpeedControlConfig *wheels,double *bias,uint32_t *rev)
+{
+ if(!YawExperiment_ArmAllowed(now))return 0;
+ *yc=outer.config;wheels[0]=inner[0].config;wheels[1]=inner[1].config;*bias=gyro_bias;*rev=revision;return 1;
+}
 static void calibration_state(uint32_t now,uint32_t seq)
 {
  uint8_t p[32]={0};float raw=0;uint32_t gs=0,gt=0;int valid=Project_ReadGyro(&raw,&gs,&gt);

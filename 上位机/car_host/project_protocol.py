@@ -13,6 +13,7 @@ import time
 
 from .models import TelemetrySample, EncoderTotals
 from .speed_control_models import SPEED_COMMANDS, REPLY_LAYOUTS, encode_speed_command
+from .continuous_models import COMMANDS as CONT_COMMANDS, REPLIES as CONT_REPLIES, encode as encode_continuous
 from .yaw_models import COMMANDS as YAW_COMMANDS, REPLIES as YAW_REPLIES, encode as encode_yaw
 
 
@@ -43,6 +44,7 @@ COMMAND_TYPES = {"hello": HELLO, "arm_pwm": ARM, "arm_speed": ARM,
                  "query_encoder_totals": GET_ENCODER_CAPS}
 COMMAND_TYPES.update(SPEED_COMMANDS)
 COMMAND_TYPES.update(YAW_COMMANDS)
+COMMAND_TYPES.update(CONT_COMMANDS)
 ACK_MESSAGES = ("MCU 已接受", "长度或参数值错误", "会话不匹配", "旧序号",
                 "未使能或模式不符", "本地禁止", "已使能，不能修改参数",
                 "PI 未配置", "命令已过期", "未知命令")
@@ -106,12 +108,14 @@ class ProjectV1Adapter:
     command_capabilities.update({name: "telemetry" for name in SPEED_COMMANDS})
 
     command_capabilities.update({name: "telemetry" for name in YAW_COMMANDS})
+    command_capabilities.update({name: "telemetry" for name in CONT_COMMANDS})
 
     def __init__(self, source: str):
         self.source = source
         self.session = 0
         self.speed_negotiated = False
         self.yaw_negotiated = False
+        self.continuous_negotiated = False
         self.seq = 0
         self._buffer = bytearray()
         self._provenance = []
@@ -207,6 +211,7 @@ class ProjectV1Adapter:
         self.reset()
         self.speed_negotiated = False
         self.yaw_negotiated = False
+        self.continuous_negotiated = False
         self.session = secrets.randbelow(0xFFFFFFFF) + 1
         self.seq = 0
         return self.encode_command("hello")
@@ -219,7 +224,9 @@ class ProjectV1Adapter:
             raise ValueError("尚未建立 PROJECT_V1 会话")
         if self.seq == 0xFFFFFFFF:
             raise ValueError("序号已耗尽，请断开并创建新会话")
-        if command in YAW_COMMANDS:
+        if command in CONT_COMMANDS:
+            payload = encode_continuous(command, values)
+        elif command in YAW_COMMANDS:
             payload = encode_yaw(command, values)
         elif command in SPEED_COMMANDS:
             payload = encode_speed_command(command, values)
@@ -327,7 +334,7 @@ class ProjectV1Adapter:
                     STATE_PROFILE: struct.Struct("<IIiihhhhHhBBBBIIIIIIIBBH"),
                     PARAMS: PARAMS_LAYOUT, PROFILE_CAPS: PROFILE_CAPS_LAYOUT,
                     ENCODER_CAPS: ENCODER_CAPS_LAYOUT, ENCODER_TOTALS: ENCODER_TOTALS_LAYOUT,
-                    **REPLY_LAYOUTS, **YAW_REPLIES}.get(kind)
+                    **REPLY_LAYOUTS, **YAW_REPLIES, **CONT_REPLIES}.get(kind)
                 if layout is None or len(payload) != layout.size:
                     self._counters["unknown_frames" if layout is None else "length_errors"] += 1
                     self._trace("unknown_frame" if layout is None else "payload_length", now, raw=raw, provenance=provenance)
@@ -336,8 +343,8 @@ class ProjectV1Adapter:
                 fields = layout.unpack(payload)
                 if kind in (STATE, STATE_PROFILE):
                     tick, last_seq, enc_l, enc_r, speed_l, speed_r, pwm_l, pwm_r, mv, battery, mode, armed, reason, local, rx_drop, tx_drop, rev, reserved = fields[:18]
-                    if (last_seq > self.seq or mode > (5 if self.yaw_negotiated else 4 if self.speed_negotiated else 2)
-                        or armed > 1 or local > 1 or reason > (6 if self.speed_negotiated or self.yaw_negotiated else 5) or reserved):
+                    if (last_seq > self.seq or mode > (6 if self.continuous_negotiated else 5 if self.yaw_negotiated else 4 if self.speed_negotiated else 2)
+                        or armed > 1 or local > 1 or reason > (6 if self.speed_negotiated or self.yaw_negotiated or self.continuous_negotiated else 5) or reserved):
                         self._counters["state_invalid"] += 1
                         self._trace("state_invalid", now, raw=raw, provenance=provenance)
                         self._issue("PROJECT_V1 STATE 身份或状态值错误")

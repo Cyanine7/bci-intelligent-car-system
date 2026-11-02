@@ -68,7 +68,7 @@ groups = {g.findtext('GroupName'): [f.findtext('FilePath') for f in g.findall('F
           for g in tree.findall('.//Group')}
 assert groups['IMU'] == ['..\\IMU\\' + n for n in ('bsp_siic.c', 'imu.c', 'icm20948_dmp.c', 'icm20948.c')]
 assert '..\\BALANCE\\sensor.c' in groups['Balance']
-for speed_file in ('speed_control.c', 'speed_capture.c', 'speed_experiment.c', 'yaw_control.c', 'yaw_experiment.c'):
+for speed_file in ('speed_control.c', 'speed_capture.c', 'speed_experiment.c', 'yaw_control.c', 'yaw_experiment.c', 'continuous_control.c'):
     assert '..\\BALANCE\\' + speed_file in groups['Balance']
 assert '..\\IMU' in tree.findtext('.//Cads/VariousControls/IncludePath').split(';')
 sensor_source = (root/'BALANCE/sensor.c').read_text(encoding='utf-8')
@@ -119,6 +119,9 @@ manifest = {
     'speed_target_prefilter_tau':'Kp/Ki',
     'yaw_experiment_version':1, 'yaw_max_segment_ms':5000, 'yaw_max_total_ms':10000,
     'yaw_default_segment_ms':2000, 'yaw_capture_capacity':1040, 'yaw_sample_bytes':84,
+    'continuous_version':1, 'continuous_mode':6, 'continuous_lease_ms':1000,
+    'continuous_target_hz':2, 'continuous_linear_acceleration':0.5, 'continuous_angular_acceleration':2.0,
+    'continuous_omega_limit_rad_s':3.75,
     'yaw_gyro_stale_ms':60, 'experiment_storage_shared':True,
     'speed_pwm_limit':16500, 'speed_max_total_ms':3000, 'speed_capture_capacity':384,
     'sources':{str(p.relative_to(root)).replace('\\','/'):hashlib.sha256(p.read_bytes()).hexdigest()

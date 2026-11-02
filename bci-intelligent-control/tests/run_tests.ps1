@@ -11,14 +11,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Production PI test compilation failed' }
     & '.\tests\test_speed_algorithm.exe'
     if ($LASTEXITCODE -ne 0) { throw 'Production PI behavior test failed' }
-    $compileCommand = '"' + $VcVars + '" >nul && cl.exe /nologo /utf-8 /W4 /LD tests\project_core_fixture.c BALANCE\speed_control.c BALANCE\speed_capture.c BALANCE\speed_experiment.c BALANCE\yaw_control.c BALANCE\yaw_experiment.c /Fe:tests\project_core_fixture.dll /link /INCREMENTAL:NO'
+    $compileCommand = '"' + $VcVars + '" >nul && cl.exe /nologo /utf-8 /W4 /LD tests\project_core_fixture.c BALANCE\speed_control.c BALANCE\speed_capture.c BALANCE\speed_experiment.c BALANCE\yaw_control.c BALANCE\yaw_experiment.c BALANCE\continuous_control.c /Fe:tests\project_core_fixture.dll /link /INCREMENTAL:NO'
     & cmd.exe /d /s /c $compileCommand
     if ($LASTEXITCODE -ne 0) { throw 'C core test compilation failed' }
     & $Python 'tests\test_project_core.py' 'tests\project_core_fixture.dll'
     if ($LASTEXITCODE -ne 0) { throw 'C core protocol/control test failed' }
     & $Python 'tests\test_speed_core.py' 'tests\project_core_fixture.dll' '1'
     if ($LASTEXITCODE -ne 0) { throw 'V2 real C protocol/capture test failed' }
-    $speedCompile = '"' + $VcVars + '" >nul && cl.exe /nologo /utf-8 /W4 /DSPEED_CONTROL_IMPLEMENTED=1 /LD tests\project_core_fixture.c tests\speed_algorithm_fixture.c BALANCE\speed_capture.c BALANCE\speed_experiment.c BALANCE\yaw_control.c BALANCE\yaw_experiment.c /Fe:tests\speed_core_fixture.dll /link /INCREMENTAL:NO'
+    $speedCompile = '"' + $VcVars + '" >nul && cl.exe /nologo /utf-8 /W4 /DSPEED_CONTROL_IMPLEMENTED=1 /LD tests\project_core_fixture.c tests\speed_algorithm_fixture.c BALANCE\speed_capture.c BALANCE\speed_experiment.c BALANCE\yaw_control.c BALANCE\yaw_experiment.c BALANCE\continuous_control.c /Fe:tests\speed_core_fixture.dll /link /INCREMENTAL:NO'
     & cmd.exe /d /s /c $speedCompile
     if ($LASTEXITCODE -ne 0) { throw 'Speed protocol test-double compilation failed' }
     & $Python 'tests\test_speed_core.py' 'tests\speed_core_fixture.dll' '1'

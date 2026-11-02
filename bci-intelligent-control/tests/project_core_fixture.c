@@ -28,6 +28,7 @@ __declspec(dllexport) void test_reset(void)
     Project_Stop(0);
     SpeedExperiment_ResetSession();
     YawExperiment_ResetSession();
+    Continuous_ResetSession();
 }
 __declspec(dllexport) void test_rx(const uint8_t *p,unsigned n)
 { while(n--) Project_RxByte(*p++); }

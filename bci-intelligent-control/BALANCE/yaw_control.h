@@ -20,6 +20,7 @@ void YawExperiment_ResetSession(void);
 void YawExperiment_Stop(uint32_t,uint8_t);
 int YawExperiment_Busy(void);
 int YawExperiment_ArmAllowed(uint32_t);
+int YawExperiment_ControlSnapshot(uint32_t,YawConfig *,SpeedControlConfig *,double *,uint32_t *);
 int YawExperiment_Negotiated(void);
 void YawExperiment_ReleaseCapture(void);
 uint8_t YawExperiment_Command(uint8_t,const uint8_t *,uint16_t,uint32_t,uint32_t,int);
