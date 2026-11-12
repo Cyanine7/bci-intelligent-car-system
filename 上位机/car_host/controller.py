@@ -868,6 +868,7 @@ class HostController(QObject):
     def _reject_oversized_rx(self, event):
         """Retire an invalid worker event without copying an unbounded payload."""
         self._rx_events_rejected += 1
+        self.continuous_control.cancel('接收事件超过容量，已停止', code='overflow')
         self.bytes_received += len(event.payload)
         self.adapter.reset()
         self.latest = None
@@ -913,6 +914,7 @@ class HostController(QObject):
                     self._io_events.extend(worker.drain_events(max_count=max_events))
                 dropped = worker.take_overflow_count()
                 if dropped:
+                    self.continuous_control.cancel('通信事件缓存溢出，已停止', code='overflow')
                     self.adapter.reset()
                     if isinstance(self.adapter, ProjectV1Adapter):
                         self.latest = None
@@ -981,6 +983,8 @@ class HostController(QObject):
                                 samples = self.adapter.feed(event.payload, event.monotonic, event.utc,
                                                             rx_metadata=rx_metadata(event))
                                 parser_after = self.adapter.diagnostics
+                                if parser_after.get('event_dropped', 0) > parser_before.get('event_dropped', 0):
+                                    self.continuous_control.cancel('协议回包缓存溢出，已停止', code='overflow')
                                 damaged = any(parser_after.get(k, 0) > parser_before.get(k, 0) for k in (
                                     "rejected_frames", "discarded_bytes", "partial_timeouts", "event_dropped",
                                     "unknown_frames", "session_rejected", "state_invalid", "state_replayed",
@@ -1039,12 +1043,14 @@ class HostController(QObject):
                             if stop:
                                 stop.setdefault("written_monotonic", event.monotonic)
                     elif event.kind == "error":
+                        self.continuous_control.cancel('连接已断开：'+event.message, send_stop=False, code='disconnected')
                         self.add_log(event.message, "ERROR", request_id=event.request_id)
                         self.connection_status = "连接异常"
                         self.connected = False
                         self.capabilities = DeviceCapabilities()
                         self._expire_project_requests(time.monotonic(), disconnected=True)
                     elif event.kind == "closed":
+                        self.continuous_control.cancel('连接已关闭：'+event.message, send_stop=False, code='disconnected')
                         self.connected = False
                         self.capabilities = DeviceCapabilities()
                         self._expire_project_requests(time.monotonic(), disconnected=True)
@@ -1071,7 +1077,7 @@ class HostController(QObject):
             self.io_backlog_exceeded = bool(input_result.get("budget_exceeded", False)
                 or (has_pending and (processed >= max_events or processed_bytes >= max_bytes
                     or pending_count >= max_events or pending_age >= .5)))
-            if has_pending and not self.io_backlog_exceeded and not self._rx_pump_scheduled:
+            if has_pending and not self._rx_pump_scheduled:
                 self._rx_pump_scheduled = True
                 QTimer.singleShot(0, self._continue_rx_pump)
             completed = time.monotonic()

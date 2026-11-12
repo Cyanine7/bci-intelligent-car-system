@@ -34,6 +34,8 @@ __declspec(dllexport) void test_rx(const uint8_t *p,unsigned n)
 { while(n--) Project_RxByte(*p++); }
 __declspec(dllexport) void test_error(void) { Project_RxError(); }
 __declspec(dllexport) void test_tick(uint32_t n,int ok) { Project_ControlTick(n,ok); }
+/* Start a deterministic fixture clock near u32 wrap without a 49-day wait. */
+__declspec(dllexport) void test_time_base(uint32_t now) { next_report=control_now=now; }
 __declspec(dllexport) void test_output(int *a,int *b) { Project_GetOutput(a,b); }
 __declspec(dllexport) unsigned test_drain(uint8_t *p,unsigned n)
 { unsigned used_bytes=0; while(used_bytes<n && Project_TxByte(p+used_bytes))used_bytes++; return used_bytes; }

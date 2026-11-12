@@ -95,6 +95,7 @@ class ProjectEvent:
     session: int
     seq: int
     values: tuple[int, ...]
+    received_monotonic: float | None = None
 
 
 class ProjectV1Adapter:
@@ -422,7 +423,7 @@ class ProjectV1Adapter:
                     if len(self._events) == self._events.maxlen:
                         self._counters["event_dropped"] += 1
                         self._issue("PROJECT_V1 回包事件缓存溢出")
-                    self._events.append(ProjectEvent(kind, session, seq, fields))
+                    self._events.append(ProjectEvent(kind, session, seq, fields, now))
                 self._trace("accepted", now, raw=raw, provenance=provenance)
                 self._counters["frames_parsed"] += 1
             self._partial_since = self._provenance[0]["monotonic"] if self._buffer else None

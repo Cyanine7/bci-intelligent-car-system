@@ -64,7 +64,7 @@ def equivalent_model(model,inner,tv_override=None):
         equivalence_max_step_error=deviation,inner_prefilter=True,
         scope='负载正向局部模型；原地转向涉及反向轮速，单独比较实测')
 
-def design(model=None,inner=None,zeta=1.5,settling=.7,*,tv_override=None,gain_scale=1.):
+def design(model=None,inner=None,zeta=1.5,settling=.75,*,tv_override=None,gain_scale=1.):
     model=(model or MotorModel.default('负载')).validate()
     if finite(zeta)<=1 or finite(settling)<=0:raise ValueError('课程过阻尼设计要求ζ>1、ts>0')
     if not 0<finite(gain_scale)<=1:raise ValueError('时延修正增益比例须大于0且不超过1')

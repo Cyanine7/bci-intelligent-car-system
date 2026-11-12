@@ -6,6 +6,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,QLabel,QPushButton,
     QTabWidget,QScrollArea,QSpinBox,QComboBox,QPlainTextEdit)
 import pyqtgraph as pg
+from .theme import style_plot
 from .speed_control_panel import FloatEdit
 from .motor_models import MotorModel
 from .yaw_models import YawConfig
@@ -23,7 +24,7 @@ class YawPanel(QWidget):
         self.button(row,'stop','STOP',lambda:host.send_command('stop'))
         self.tabs=QTabWidget();layout.addWidget(self.tabs);forms=[]
         for name in ('模型与内环','外环 PI','阶跃执行','曲线与指标'):
-            widget=QWidget();scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(widget)
+            widget=QWidget();widget.setObjectName("formPage");scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(widget)
             self.tabs.addTab(scroll,name);forms.append(QVBoxLayout(widget))
         form=forms[0];form.addWidget(QLabel('负载正向模型；W=0.16m。平均参数用于课程建模，各轮PI分别执行。'))
         self.model_boxes=[];self.inner_boxes=[];model=MotorModel.default('负载');cfg=YawConfig()
@@ -43,7 +44,7 @@ class YawPanel(QWidget):
             grid.addWidget(QLabel(label),i//2*2,i%2);grid.addWidget(box,i//2*2+1,i%2)
         self.tv_text=QLabel();self.tv_text.setWordWrap(True);form.addWidget(self.tv_text)
         grid=QGridLayout();form.addLayout(grid)
-        self.zeta=FloatEdit(1.5);self.settling=FloatEdit(.7);self.kp=FloatEdit(cfg.kp);self.ki=FloatEdit(cfg.ki);self.delta=FloatEdit(.16)
+        self.zeta=FloatEdit(1.5);self.settling=FloatEdit(.75);self.kp=FloatEdit(cfg.kp);self.ki=FloatEdit(cfg.ki);self.delta=FloatEdit(cfg.delta_limit)
         self.pwm=QSpinBox();self.pwm.setRange(1,16500);self.pwm.setValue(16500)
         self.sign=QLabel('IMU正值对应左转（固定）')
         for i,(label,box) in enumerate((('设计ζ (>1)',self.zeta),('设计ts (s，2%)',self.settling),('外环Kp (m/rad)',self.kp),
@@ -94,6 +95,7 @@ class YawPanel(QWidget):
                 ('双轮：目标、前置滤波目标与反馈','m/s'),('双轮PWM：限幅前后','PWM')):
             plot=pg.PlotWidget(title=title);plot.setMinimumHeight(400);plot.addLegend(colCount=3);plot.setLabel('bottom','设备时间','s');plot.setLabel('left',ylabel)
             forms[3].addWidget(plot);plot.getAxis('left').enableAutoSIPrefix(False)
+            style_plot(plot)
             self.plots.append(plot)
         self._updating=False;self.calculate();self.timer=QTimer(self);self.timer.setInterval(200);self.timer.timeout.connect(self.refresh);self.timer.start();self.refresh()
         for box in (self.kp,self.ki,self.delta):box.textChanged.connect(self.prediction_dirty)
@@ -103,6 +105,8 @@ class YawPanel(QWidget):
         self.kind.currentIndexChanged.connect(self.prediction_dirty)
     def button(self,row,key,label,callback):
         b=QPushButton(label);row.addWidget(b);self.buttons[key]=b
+        if key in ('stop', 'run', 'apply'):
+            b.setObjectName('danger' if key == 'stop' else 'primary')
         def invoke():
             try:
                 result=callback()

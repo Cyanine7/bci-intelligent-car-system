@@ -8,6 +8,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (QDialog,QWidget,QVBoxLayout,QHBoxLayout,QGridLayout,
     QLabel,QPushButton,QLineEdit,QSpinBox,QComboBox,QCheckBox,QPlainTextEdit,QTabWidget,QScrollArea)
 import pyqtgraph as pg
+from .theme import style_plot
 from .motor_models import MotorModel,MotorModelStore,DEFAULTS,DEFAULT_CONDITION
 from .speed_control_models import SpeedConfig,ACTIVE,SECOND,SPEED_LIMIT_MM_S
 from .speed_control_analysis import DEFAULT_MP,design_pair,predict,analyze,step_range,rolling_deadzone,describe_analysis
@@ -42,8 +43,9 @@ class SpeedControlPanel(QDialog):
         self.tabs=tabs=QTabWidget();layout.addWidget(tabs);curves=QWidget()
         forms=[]
         for title in ('电机模型','PI 参数','阶跃执行'):
-            settings=QWidget();scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(settings)
+            settings=QWidget();settings.setObjectName("formPage");scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(settings)
             tabs.addTab(scroll,title);forms.append(QVBoxLayout(settings))
+        curves.setObjectName("formPage")
         curves_scroll=QScrollArea();curves_scroll.setWidgetResizable(True);curves_scroll.setWidget(curves)
         tabs.addTab(curves_scroll,'曲线与指标')
         form=forms[0]
@@ -125,6 +127,7 @@ class SpeedControlPanel(QDialog):
         colors=['#338aff','#f59729','#38a65c','#a767db','#dc4b4b','#00a9ad']
         for title,names in zip(('速度 m/s','输出 PWM','误差 m/s'),labels):
             plot=pg.PlotWidget();plot.addLegend(colCount=3 if len(names)>4 else 2);plot.setLabel('left',title);plot.setLabel('bottom','相对阶跃时间','s');plot.showGrid(x=True,y=True)
+            style_plot(plot)
             plot.setMinimumHeight(200)
             plot.getAxis('left').enableAutoSIPrefix(False)
             self.plots.append(plot);self.lines.append([plot.plot(name=name,pen=pg.mkPen(colors[i],width=1.5)) for i,name in enumerate(names)])
@@ -159,6 +162,8 @@ class SpeedControlPanel(QDialog):
 
     def _button(self,row,key,label,callback):
         button=QPushButton(label);row.addWidget(button);self.buttons[key]=button
+        if key in ('stop', 'run', 'apply'):
+            button.setObjectName('danger' if key == 'stop' else 'primary')
         button.clicked.connect(lambda checked=False:self._action(callback));return button
     def _action(self,callback):
         try:

@@ -26,7 +26,8 @@ class FakeContinuousDevice:
             if w.armed or y.busy or w.speed.busy:return 4
             if w.faults.get('continuous_unsupported'):return 9
             limit=float(w.faults.get('continuous_omega_limit',OMEGA_LIMIT))
-            self.negotiated=True;y.emit(0x99,w.seq,CAPS.pack(1,3,100,20,LEASE_MS,1.18,limit,.5,2.));return 0
+            version=w.faults.get('continuous_version',2)
+            self.negotiated=True;y.emit(0x99,w.seq,CAPS.pack(version,7 if version==2 else 3,100,20,LEASE_MS if version==2 else 1000,1.18,limit,.5,2.));return 0
         if not self.negotiated:return 9
         if kind==2:
             if w.armed or y.busy or w.speed.busy:return 4
@@ -39,15 +40,16 @@ class FakeContinuousDevice:
         try:version,flags,reserved,revision,deadline,v,omega=TARGET.unpack(body)
         except Exception:return 1
         limit=float(w.faults.get('continuous_omega_limit',OMEGA_LIMIT))
-        if version!=1 or flags or reserved or not all(math.isfinite(x) for x in (v,omega)) or abs(v)>1.1800001 or abs(omega)>limit+1e-7:return 1
+        if version!=2 or flags & ~1 or reserved or not all(math.isfinite(x) for x in (v,omega)) or abs(v)>1.1800001 or abs(omega)>limit+1e-7:return 1
         if not w.local_enable:return 5
         if not w.armed or w.mode!=6:return 4
         if revision!=self.revision:return 7
         if not 0<((deadline-w.tick_ms)&0xffffffff)<=LEASE_MS:return 8
         self.requested=[v,omega];self.accepted=w.seq
-        for i,x in enumerate(self.requested):
-            if x==0:self.current[i]=0.
-        if not v and not omega:self.stop()
+        if flags & 1:
+            for i,x in enumerate(self.requested):
+                if x==0:self.current[i]=0.
+            if not v and not omega:self.stop()
         w._deadline=deadline;w._idle_deadline=None;return 0
 
     def tick(self):

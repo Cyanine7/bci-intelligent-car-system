@@ -10,7 +10,8 @@ from test_speed_control import speed_host,confirm
 def test_course_calculation_and_duration_boundaries():
     cfg,ctx=design()
     assert ctx['tau_v_s']==pytest.approx(.05982522275724787)
-    assert cfg.kp==pytest.approx(.269598536858538) and cfg.ki==pytest.approx(2.1422925162150044)
+    assert ctx['design_ts_s']==.75 and cfg.delta_limit==.6
+    assert cfg.kp==pytest.approx(.2409586344013021) and cfg.ki==pytest.approx(1.8661748141250698)
     assert ctx['tv_denominator']==pytest.approx([1,40.00033235384933,839.9067892799715])
     assert YawConfig.unpack(cfg.pack())==cfg
     assert validate_segments([dict(v=0,target=.3,duration_ms=5000),dict(v=0,target=-.3,duration_ms=5000)])
@@ -19,6 +20,7 @@ def test_course_calculation_and_duration_boundaries():
 def test_calibration_finishes_without_manual_status_read_and_keeps_arm_ready(speed_host,qapp):
     from car_host.yaw_panel import YawPanel
     h,advance,_=speed_host;s=h.yaw_control;p=YawPanel(h);p.timer.stop()
+    assert p.settling.value()==.75 and p.delta.value()==.6
     try:
         confirm(h,advance,s.query_capabilities)
         confirm(h,advance,lambda:s.apply_config(p.config()))

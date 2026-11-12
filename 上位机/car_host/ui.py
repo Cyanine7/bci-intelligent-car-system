@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPlainTextEdit, QPushButton,
@@ -21,31 +22,7 @@ from .runtime import prepare_qt_fonts
 from .transport import ConnectionConfig, list_serial_ports
 
 
-STYLE = """
-QMainWindow, QWidget#workbench { background: #eef2f6; color: #1d2c3e; }
-QWidget { font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif; font-size: 12px; }
-QLabel#title { font-size: 23px; font-weight: 700; color: #18324d; }
-QLabel#subtitle { color: #66798b; }
-QLabel#badge { background: #dfebe8; color: #245f52; padding: 6px 12px; border-radius: 12px; font-weight: 600; }
-QGroupBox { background: white; border: 1px solid #d6e0e8; border-radius: 8px; margin-top: 18px; padding: 14px 10px 10px; font-weight: 600; }
-QGroupBox::title { subcontrol-origin: margin; left: 13px; padding: 0px 6px; color: #23415d; }
-QPushButton { background: #f1f5f8; border: 1px solid #cddae4; border-radius: 5px; padding: 6px 12px; color: #23415d; }
-QPushButton:hover { background: #e4edf4; }
-QPushButton:disabled { color: #9aa8b3; background: #f4f6f8; }
-QPushButton#primary { color: white; background: #276f78; border: 1px solid #276f78; font-weight: 600; }
-QPushButton#primary:hover { background: #205e66; }
-QPushButton#primary:disabled { background: #a0b8ba; border-color: #a0b8ba; }
-QComboBox { border: 1px solid #ccd9e3; border-radius: 4px; padding: 5px 7px; background: white; min-height: 19px; }
-QLineEdit, QSpinBox { border: 1px solid #ccd9e3; border-radius: 4px; padding: 5px 7px; background: white; min-height: 19px; }
-QPlainTextEdit { border: 1px solid #d5dfe8; border-radius: 5px; background: #fbfcfe; padding: 5px; font-family: Consolas, 'Microsoft YaHei UI'; font-size: 12px; font-weight: 400; }
-QLabel#metric { font-size: 27px; font-weight: 700; color: #1f5964; }
-QLabel#muted { color: #7a8c9d; font-weight: 400; }
-QFrame#metricCard { background: #f3f7fa; border-radius: 6px; }
-QSplitter::handle { background: #e1e8ee; }
-QTabBar::tab { padding: 10px 24px; color: #526a80; }
-QTabBar::tab:selected { color: #205e66; background: white; font-weight: 700; border-bottom: 3px solid #276f78; }
-QStatusBar { background: #e3ebf1; color: #425c73; }
-"""
+from .theme import STYLE, style_plot
 
 
 class MainWindow(QMainWindow):
@@ -90,7 +67,7 @@ class MainWindow(QMainWindow):
         heading = QVBoxLayout()
         title = QLabel("小车调试工作台")
         title.setObjectName("title")
-        subtitle = QLabel("实时监测 · 速度环实验 · 角速度环实验 · 连续控制 · 设备与调试")
+        subtitle = QLabel("连接设备，观察数据，完成控制实验")
         subtitle.setObjectName("subtitle")
         heading.addWidget(title)
         heading.addWidget(subtitle)
@@ -103,15 +80,43 @@ class MainWindow(QMainWindow):
         # Connection configuration belongs to the device page; everyday actions
         # remain visible above every task, including the experiment page.
         connection_settings = self._build_connection_bar()
-        actions = QHBoxLayout()
+        action_bar = QFrame()
+        action_bar.setObjectName("actionBar")
+        actions = QHBoxLayout(action_bar)
+        actions.setContentsMargins(12, 8, 12, 8)
         self.connection_shortcut = QPushButton("设备设置")
         actions.addWidget(self.connection_shortcut)
         actions.addStretch()
         for button in (self.connect_button, self.disconnect_button, self.record_button, self.stop_button):
             actions.addWidget(button)
-        layout.addLayout(actions)
+        layout.addWidget(action_bar)
+        self.context_bar = QFrame()
+        self.context_bar.setObjectName("contextBar")
+        context_layout = QHBoxLayout(self.context_bar)
+        context_layout.setContentsMargins(14, 9, 14, 9)
+        self.context_text = QLabel()
+        self.context_text.setObjectName("contextText")
+        self.context_text.setWordWrap(True)
+        context_layout.addWidget(self.context_text, 1)
+        self.context_action = QPushButton("配置设备")
+        self.context_action.clicked.connect(self.connection_shortcut.click)
+        context_layout.addWidget(self.context_action)
+        layout.addWidget(self.context_bar)
+        workspace_row = QHBoxLayout()
+        workspace_row.setSpacing(14)
+        self.navigation = QFrame()
+        self.navigation.setObjectName("navigation")
+        self.navigation.setFixedWidth(152)
+        self.navigation_layout = QVBoxLayout(self.navigation)
+        self.navigation_layout.setContentsMargins(10, 16, 10, 12)
+        nav_title = QLabel("工作空间")
+        nav_title.setObjectName("muted")
+        self.navigation_layout.addWidget(nav_title)
+        self.navigation_buttons = []
+        workspace_row.addWidget(self.navigation)
         self.workspace_tabs = QTabWidget()
-        layout.addWidget(self.workspace_tabs, 1)
+        workspace_row.addWidget(self.workspace_tabs, 1)
+        layout.addLayout(workspace_row, 1)
         monitor = QWidget()
         monitor_layout = QVBoxLayout(monitor)
         monitor_layout.setContentsMargins(0, 6, 0, 0)
@@ -140,7 +145,24 @@ class MainWindow(QMainWindow):
         device_scroll.setWidget(device)
         self.workspace_tabs.addTab(device_scroll, "设备与调试")
         self.connection_shortcut.clicked.connect(lambda: self.workspace_tabs.setCurrentWidget(device_scroll))
+        for index in range(self.workspace_tabs.count()):
+            button = QPushButton(self.workspace_tabs.tabText(index))
+            button.setObjectName("navItem")
+            button.setCheckable(True)
+            button.setAutoExclusive(True)
+            button.setToolTip(f"{button.text()} · Ctrl+{index + 1}")
+            button.clicked.connect(lambda checked=False, i=index: self.workspace_tabs.setCurrentIndex(i))
+            self.navigation_layout.addWidget(button)
+            self.navigation_buttons.append(button)
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{index + 1}"), self)
+            shortcut.activated.connect(lambda i=index: self.workspace_tabs.setCurrentIndex(i))
+        self.navigation_layout.addStretch()
+        nav_note = QLabel("PROJECT_V1\n设备控制工作台")
+        nav_note.setObjectName("muted")
+        self.navigation_layout.addWidget(nav_note)
+        self.navigation_buttons[0].setChecked(True)
         self.workspace_tabs.currentChanged.connect(self._workspace_changed)
+        self._update_navigation_layout()
         if controller.automation_service is not None:
             bar = QHBoxLayout()
             self.automation_status_value = QLabel("等待实验表与阶段批准")
@@ -176,9 +198,17 @@ class MainWindow(QMainWindow):
         upper.setSizes([420, 840])
         upper.setStretchFactor(1, 1)
         vertical.addWidget(upper)
-        vertical.addWidget(self._build_log_panel())
+        self.log_panel = self._build_log_panel()
+        vertical.addWidget(self.log_panel)
         vertical.setSizes([530, 220])
         monitor_layout.addWidget(vertical, 1)
+        self.log_toggle = QPushButton("通信日志")
+        self.log_toggle.setObjectName("logToggle")
+        self.log_toggle.setCheckable(True)
+        self.log_toggle.setChecked(True)
+        self.log_toggle.setToolTip("收起或展开日志；接收和录制继续")
+        self.log_toggle.toggled.connect(self.log_panel.setVisible)
+        actions.insertWidget(1, self.log_toggle)
         self.statusBar().showMessage("速度环、角速度环与连续键盘控制；连接设置在“设备与调试”。")
 
         self.controller.changed.connect(self.refresh_state)
@@ -250,6 +280,7 @@ class MainWindow(QMainWindow):
         self.protocol_combo.setCurrentIndex(self.protocol_combo.findData(self._preferences.profile.protocol))
         self.protocol_combo.setToolTip("新烧录固件请选择 PROJECT_V1；连接后仅自动 HELLO 握手，不自动使能或启动。模拟设备仅支持 LEGACY_APP。")
         self.stop_button = QPushButton("STOP · 停止并失能")
+        self.stop_button.setObjectName("danger")
         self.stop_button.clicked.connect(self._stop_project)
         protocol_row.addWidget(QLabel("应用协议"))
         protocol_row.addWidget(self.protocol_combo)
@@ -464,14 +495,19 @@ class MainWindow(QMainWindow):
         self.right_channel.setChecked(True)
         self.plot_pause = QCheckBox("暂停曲线")
         self.clear_plot_button = QPushButton("清空曲线")
+        self.reset_plot_button = QPushButton("重置视图")
+        self.reset_plot_button.setToolTip("恢复最近60秒与自动纵轴；保留已接收数据")
+        self.reset_plot_button.clicked.connect(self._reset_plot_view)
         row.addWidget(self.left_channel)
         row.addWidget(self.right_channel)
         row.addStretch()
         row.addWidget(self.plot_pause)
+        row.addWidget(self.reset_plot_button)
         row.addWidget(self.clear_plot_button)
         column.addLayout(row)
         pg.setConfigOptions(antialias=True)
         self.plot = pg.PlotWidget(background="w")
+        style_plot(self.plot)
         self.plot.setMinimumHeight(200)
         self.plot.showGrid(x=True, y=True, alpha=0.15)
         self.plot.setLabel("left", "速度幅值", units="m/s")
@@ -485,7 +521,7 @@ class MainWindow(QMainWindow):
         self.plot.getAxis("bottom").setPen(pg.mkPen("#728699"))
         self.plot.getAxis("left").setTextPen(pg.mkPen("#52697e"))
         self.plot.getAxis("bottom").setTextPen(pg.mkPen("#52697e"))
-        self.left_curve = self.plot.plot([], [], name="左轮", pen=pg.mkPen("#277b86", width=2))
+        self.left_curve = self.plot.plot([], [], name="左轮", pen=pg.mkPen("#426ce0", width=2))
         self.right_curve = self.plot.plot([], [], name="右轮", pen=pg.mkPen("#e49b45", width=2))
         column.addWidget(self.plot, 1)
         tip = QLabel("显示最近60秒 · 暂停仅冻结曲线，接收与录制继续 · 鼠标可缩放查看")
@@ -734,7 +770,25 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.controller.add_log(f"功能面板无法打开：{exc}", "ERROR")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "navigation"):
+            self._update_navigation_layout()
+
+    def _update_navigation_layout(self):
+        wide = self.width() >= 1240
+        self.navigation.setVisible(wide)
+        self.workspace_tabs.tabBar().setVisible(not wide)
+
+    def _reset_plot_view(self):
+        self.plot.setXRange(-60, 0, padding=0)
+        self.plot.enableAutoRange(axis="y", enable=True)
+
     def _workspace_changed(self, index: int) -> None:
+        for i, button in enumerate(self.navigation_buttons):
+            button.setChecked(i == index)
+        if hasattr(self, "log_toggle"):
+            self.log_toggle.setVisible(index == 0)
         page = self.workspace_tabs.widget(index)
         if page is not self.continuous_panel:
             self.controller.continuous_control.cancel('已切换工作页，已STOP')
@@ -870,6 +924,13 @@ class MainWindow(QMainWindow):
                                  "蓝牙 SPP" if host.source == "BLUETOOTH_SPP" and host.worker is not None else
                                  "真实串口" if host.connected else "未连接")
         self.source_badge.setToolTip("Classic Bluetooth RFCOMM/SPP · 真实无线数据" if host.source == "BLUETOOTH_SPP" else "")
+        badge_state = ("simulation" if host.source in ("SIMULATOR", "SIMULATION_PROJECT_V1") and host.connected
+                       else "connected" if host.connected else "disconnected")
+        if self.source_badge.property("state") != badge_state:
+            self.source_badge.setProperty("state", badge_state)
+            self.source_badge.style().unpolish(self.source_badge)
+            self.source_badge.style().polish(self.source_badge)
+        self._refresh_context()
         self._refresh_tools()
         self.frequency_value.setText(f"{host.receive_frequency:.1f} Hz")
         self.counter_value.setText(f"RX {host.bytes_received:,} B / TX {host.bytes_sent:,} B / {host.frames_received:,} 帧")
@@ -915,6 +976,21 @@ class MainWindow(QMainWindow):
             self.record_button.setStyleSheet("color: #a3483b; font-weight: 600;")
         else:
             self.record_button.setStyleSheet("")
+    def _refresh_context(self):
+        host = self.controller
+        connected = host.connected
+        self.context_action.setVisible(not connected and host.worker is None)
+        if not connected:
+            text = ("尚未连接 · 点击右上方“连接”使用已保存设备，或在设备设置中选择连接方式。"
+                    if host.worker is None else f"{host.connection_status} · 连接进度与结果见通信日志。")
+        elif host.config.protocol != "PROJECT_V1":
+            text = "遥测监测已就绪 · 可查看轮速、录制数据；控制实验需要 PROJECT_V1 设备。"
+        elif not host.project_state_fresh:
+            text = "设备已连接 · 等待握手与新鲜设备状态，控制功能按实际设备能力开放。"
+        else:
+            text = "设备状态已更新 · 选择实验页配置与回读参数，或进入连续控制页。"
+        self.context_text.setText(text)
+
     def _refresh_plot(self):
         host = self.controller
         now = time.monotonic()

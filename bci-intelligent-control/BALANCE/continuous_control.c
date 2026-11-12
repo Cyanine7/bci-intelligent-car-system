@@ -38,21 +38,23 @@ uint8_t Continuous_Command(uint8_t type,const uint8_t *p,uint16_t n,uint32_t now
  uint8_t reply[24]={0};uint32_t until;float v,w;
  if(type==28) {
   if(n)return 1;if(enabled || SpeedExperiment_Busy() || YawExperiment_Busy())return 4;
-  negotiated=1;reply[0]=1;reply[1]=(uint8_t)(SPEED_CONTROL_IMPLEMENTED && SPEED_CONTROL_TARGET_FILTER?3:0);
+  negotiated=1;reply[0]=2;reply[1]=(uint8_t)(SPEED_CONTROL_IMPLEMENTED && SPEED_CONTROL_TARGET_FILTER?7:0);
   w16(reply+2,100);w16(reply+4,20);w16(reply+6,CONTINUOUS_LEASE_MS);
   wf(reply+8,(float)YAW_MAX_WHEEL_SPEED);wf(reply+12,(float)CONTINUOUS_OMEGA_LIMIT);wf(reply+16,.5f);wf(reply+20,2);
   Project_SpeedReply(0x99,seq,reply,24);return 0;
  }
  if(type!=29 || !negotiated)return 9;
- if(n!=20 || p[0]!=1 || p[1] || p[2] || p[3])return 1;
+ if(n!=20 || p[0]!=2 || (p[1]&~1U) || p[2] || p[3])return 1;
  if(!enabled)return 4;if(r32(p+4)!=revision)return 7;
  until=r32(p+8);if((int32_t)(until-now)<=0 || (uint32_t)(until-now)>CONTINUOUS_LEASE_MS)return 8;
  v=rf(p+12);w=rf(p+16);
  if(!finite_value(v) || !finite_value(w) || fabs(v)>YAW_MAX_WHEEL_SPEED+1e-7 || fabs(w)>CONTINUOUS_OMEGA_LIMIT+1e-7)return 1;
  requested[0]=v;requested[1]=w;accepted=seq;deadline=until;*end=until;
- /* Released axes bypass the ramp; nonzero changes preserve all controller state. */
- if(v==0)current[0]=0;if(w==0)current[1]=0;
- if(v==0 && w==0) { YawControl_Reset(&outer);SpeedControl_Reset(&inner[0]);SpeedControl_Reset(&inner[1]); }
+ /* v2普通零目标平滑过渡；flags bit0仅用于保留旧按住模式的松键语义。 */
+ if(p[1]&1U) {
+  if(v==0)current[0]=0;if(w==0)current[1]=0;
+  if(v==0 && w==0) { YawControl_Reset(&outer);SpeedControl_Reset(&inner[0]);SpeedControl_Reset(&inner[1]); }
+ }
  return 0;
 }
 static double approach(double x,double target,double step)
@@ -73,7 +75,7 @@ int Continuous_Tick(uint32_t now,uint32_t dt,int active,int *left,int *right)
   if(!fresh || !dt || dt>30 || (int32_t)(deadline-now)<=0) { *left=*right=0;return 0; }
   flags|=1;
   for(i=0;i<2;i++) {
-   current[i]=requested[i]==0?0:approach(current[i],requested[i],(i?2:.5)*dt*.001);
+   current[i]=approach(current[i],requested[i],(i?2:.5)*dt*.001);
    wf(latest+16+4*i,(float)requested[i]);wf(latest+24+4*i,(float)current[i]);
   }
   Project_ReadSensors(&enc[0],&enc[1],&vel[0],&vel[1],&battery,&car,&enable);

@@ -14,6 +14,7 @@ from car_host.controller import HostController
 from car_host.transport import ConnectionConfig
 from car_host.yaw_models import YawConfig
 from car_host.continuous_models import TARGET, LEASE_MS
+from car_host.project_protocol import encode_frame
 from car_host.speed_control_analysis import ReferenceController
 from test_application_extensions import Link
 
@@ -23,6 +24,7 @@ dll.test_rx.argtypes=(c.c_void_p,c.c_uint);dll.test_tick.argtypes=(c.c_uint32,c.
 dll.test_encoder.argtypes=(c.c_uint32,c.c_uint32,c.c_int32,c.c_int32)
 dll.test_gyro.argtypes=(c.c_float,c.c_uint32,c.c_uint32,c.c_int)
 dll.test_drain.argtypes=(c.c_void_p,c.c_uint);dll.test_drain.restype=c.c_uint
+dll.test_time_base.argtypes=(c.c_uint32,)
 dll.test_reset();dll.test_sensor_counts(0,0)
 original=time.monotonic;clock=[original()];time.monotonic=lambda:clock[0]
 directory=root.parent/'上位机/.qa'/('continuous_native_'+uuid4().hex[:8]);directory.mkdir(parents=True)
@@ -47,10 +49,11 @@ def pump():
         raw=h.worker.sent[sent][0];sent+=1
         if reference_enabled:
             if raw[3]==29:
-                _,_,_,_,_,v,w=TARGET.unpack(raw[14:-2]);requested[:]=[v,w]
-                for i,value in enumerate(requested):
-                    if value==0:current[i]=0.
-                if not v and not w:
+                _,flags,_,_,_,v,w=TARGET.unpack(raw[14:-2]);requested[:]=[v,w]
+                if flags & 1:
+                    for i,value in enumerate(requested):
+                        if value==0:current[i]=0.
+                if flags & 1 and not v and not w:
                     error=output=0.
                     for ref in refs:ref.reset()
             elif raw[3]==4:reset_reference()
@@ -101,6 +104,7 @@ try:
     h.poll();pump()
     while not h.project_state_fresh:pump()
     s=h.continuous_control;y=h.yaw_control
+    s.set_mode("legacy")
     confirmed(s.query_capabilities);confirmed(y.query_capabilities)
     confirmed(lambda:y.apply_config(cfg));confirmed(y.calibrate)
     for _ in range(215):pump()
@@ -128,11 +132,32 @@ try:
 
     s.cancel();reference_enabled=False
     for _ in range(10):pump()
+    s.set_mode('discrete');reset_reference();arm();reference_enabled=True
+    s.press('up');s.release('up');s.press('left');s.release('left')
+    for _ in range(100):pump()
+    assert current==[.1,.3] or (abs(current[0]-.1)<1e-6 and abs(current[1]-.3)<1e-6)
+    # Direction cancels once; normal zero ramps without resetting PI early.
+    # Allow the 500 ms send interval and the subsequent deceleration.
+    s.press('right');s.release('right')
+    for _ in range(75):pump()
+    assert current[0]>.09 and current[1]==0 and s.running
+    s.press('down');s.release('down')
+    for _ in range(75):pump()
+    assert current==[0.,0.] and last_outputs==(0,0) and s.running
+    s.press('down');s.release('down');s.press('left');s.release('left')
+    for _ in range(80):pump()
+    assert current[0]<0 and current[1]<0 and s.running
+    s.cancel();pump();assert last_outputs==(0,0)
+    reference_enabled=False
+    print('PASS: v2 latched reverse, smooth ordinary zero, exact 100Hz PI continuity and immediate STOP')
+    for _ in range(10):pump()
     arm();s.press('up')
     for _ in range(70):pump()
     assert s.running
     # Simulate host process loss: no STOP and no further target packets.
-    s.engaged=False;s.keys.clear();last_deadline=s.latest['deadline'];before=len(h.worker.sent)
+    s.engaged=False;s.keys.clear()
+    last_deadline=next(m['values']['deadline_tick'] for m in reversed(list(h.command_metadata.values())) if m['command']=='continuous_target')
+    before=len(h.worker.sent)
     for _ in range(LEASE_MS//10+10):
         pump()
         if not h.latest.armed:break
@@ -173,7 +198,42 @@ try:
     for _ in range(150):pump()
     assert len(h.worker.sent)==count and not h.latest.armed and last_outputs==(0,0)
     print('PASS: gyro >60ms, local disable and explicit STOP; no old-key restart')
-    (directory/'result.txt').write_text(f'PASS: 2Hz, lease {LEASE_MS}ms; {checked} exact production PI ticks; no hardware\n',encoding='utf-8')
+    # Fresh session near u32 wrap; real production parser must reject old packets
+    # without extending the accepted target's absolute deadline.
+    h.disconnect_device();h.poll();dll.test_reset();sent=0;tick=0xffffe000
+    dll.test_time_base(tick)
+    assert h.connect_device(ConnectionConfig(port='SOFTWARE_ONLY',protocol='PROJECT_V1'))
+    h.poll();pump()
+    while not h.project_state_fresh:pump()
+    s=h.continuous_control;y=h.yaw_control
+    confirmed(s.query_capabilities);confirmed(y.query_capabilities)
+    confirmed(lambda:y.apply_config(cfg));confirmed(y.calibrate)
+    for _ in range(215):pump()
+    confirmed(y.read_status)
+    while tick < 0xfffffc00:pump()
+    arm();s.press('up');s.release('up')
+    for _ in range(40):pump()
+    s.engaged=False
+    # Finish the last already-queued frame, then freeze the true accepted deadline.
+    for _ in range(6):pump()
+    deadline=s.latest['deadline'];assert deadline<2000
+    last_target=next(raw for raw,_ in reversed(h.worker.sent) if raw[3]==29)
+    fields=list(TARGET.unpack(last_target[14:-2]))
+    # Old seq/session, v1 target, and an expired new-seq target cannot renew.
+    dll.test_rx(last_target,len(last_target))
+    raw=encode_frame(29,h.adapter.session^1,h.adapter.seq+1,last_target[14:-2]);dll.test_rx(raw,len(raw))
+    fields[0]=1
+    raw=encode_frame(29,h.adapter.session,h.adapter.seq+1,TARGET.pack(*fields));dll.test_rx(raw,len(raw))
+    fields[0]=2;fields[4]=tick
+    raw=encode_frame(29,h.adapter.session,h.adapter.seq+2,TARGET.pack(*fields));dll.test_rx(raw,len(raw))
+    h.adapter.seq+=2  # The fixture emitted these two new-seq requests explicitly.
+    for _ in range(LEASE_MS//10+10):
+        pump()
+        if not h.latest.armed:break
+    assert not h.latest.armed and last_outputs==(0,0) and h.latest.stop_reason==2,(h.latest,last_outputs,tick,deadline)
+    assert ((h.latest.device_time_ms-deadline)&0xffffffff)<100
+    print('PASS: continuous u32 wrap, rejected v1/expired/old-seq/old-session targets do not renew lease')
+    (directory/'result.txt').write_text(f'PASS: v2 + legacy, 2Hz/5Hz, lease {LEASE_MS}ms; {checked} exact production PI ticks; smooth zero/STOP, u32 wrap/replay; no hardware\n',encoding='utf-8')
     print('Evidence:',directory)
 finally:
     h.disconnect_device();h.poll();h.shutdown();time.monotonic=original

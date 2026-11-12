@@ -30,9 +30,9 @@ class YawConfig:
     version:int=1
     sign:int=1
     pwm_limit:int=16500
-    kp:float=.269598536858538
-    ki:float=2.1422925162150044
-    delta_limit:float=.16
+    kp:float=.2409586344013021
+    ki:float=1.8661748141250698
+    delta_limit:float=.6
     kp_left:float=42736.99955736679
     ki_left:float=1188723.7747308263
     kp_right:float=40483.753121200316

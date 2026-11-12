@@ -8,9 +8,9 @@ from car_host.yaw_analysis import design,predict,stability_margin
 
 def test_manual_tv_formulas_and_validation():
     baseline,ctx=design()
-    assert stability_margin(baseline,ctx)['extra_delay_margin_s']==pytest.approx(.0308557,rel=1e-4)
+    assert stability_margin(baseline,ctx)['extra_delay_margin_s']==pytest.approx(.03683028,rel=1e-4)
     manual,first=design(tv_override=dict(order=1,tau_v_s=.08),gain_scale=.5)
-    wn=4*(1.5+math.sqrt(1.5**2-1))/.7
+    wn=4*(1.5+math.sqrt(1.5**2-1))/.75
     assert manual.kp==pytest.approx(.5*.16*(3*wn*.08-1))
     assert manual.ki==pytest.approx(.5*.16*.08*wn**2)
     assert first['tv_denominator']==[.08,1.]

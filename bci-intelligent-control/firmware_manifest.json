@@ -3,10 +3,10 @@
   "application_address": "0x08010000",
   "application_partition_size": 458752,
   "vector_offset": "0x10000",
-  "size_bytes": 75616,
+  "size_bytes": 75568,
   "initial_sp": "0x2001C8B0",
   "reset_handler": "0x08010335",
-  "sha256": "d0922e606bf36727bd26da24beef661dd593887960f91586af5aed52408f7786",
+  "sha256": "d9c6fff067acae22d5713f958602ab1c3544b9e58a0c8b52dab10ce763a8b037",
   "hardware_initialization_unchanged": false,
   "existing_hardware_initialization_preserved": true,
   "imu_initialization_added": true,
@@ -36,9 +36,11 @@
   "yaw_default_segment_ms": 2000,
   "yaw_capture_capacity": 1040,
   "yaw_sample_bytes": 84,
-  "continuous_version": 1,
+  "continuous_version": 2,
   "continuous_mode": 6,
-  "continuous_lease_ms": 1000,
+  "continuous_lease_ms": 2000,
+  "continuous_smooth_zero": true,
+  "continuous_legacy_release_flag": 1,
   "continuous_target_hz": 2,
   "continuous_linear_acceleration": 0.5,
   "continuous_angular_acceleration": 2.0,
@@ -51,8 +53,8 @@
   "sources": {
     "BALANCE/balance.c": "8d42637f6184deeeff5b427a7b21f69b549e12f5420fe290fa2d3e8a94d4abd8",
     "BALANCE/balance.h": "644ce7fc9124a68c41c0ad4c11187c9c6d1d2b305db3fc993cb7c99041f70b23",
-    "BALANCE/continuous_control.c": "49590641f0a4b10fa787ebccfe966ead2e05212dd946b3da13b68d10679098eb",
-    "BALANCE/continuous_control.h": "1290be1861fd591d38effe831d08383dcb65e1fff0dc65f30ad056cb8673e972",
+    "BALANCE/continuous_control.c": "f96fcf880152af749a8f252a22e01967ff0875310f22c9164b4d93cc201c7fbf",
+    "BALANCE/continuous_control.h": "702b49bc52398aa3d0deac83e3e4ce3e62e6838b8fd09cb2c19278e92da7997a",
     "BALANCE/experiment_storage.h": "89871f82f68d2b82013fa31c729f12a62b031433c6c82112c3fd9df8f72f2332",
     "BALANCE/project_board.c": "fc7f8b9d2a88afa03b3ba05e7f8c180f02b85b6fbd3669016762d349d423fc39",
     "BALANCE/project_link.c": "91dc7724b03aa45a44c9db5e4ad34df18fd147b1413cbf067fd80dfd5d4862b0",
@@ -237,6 +239,6 @@
     "USER/stm32f4xx_it.h": "f6f91ec5aa586bc6bafad43760c89271ace1064ed9b47097d5977fa3473063d8",
     "USER/system_stm32f4xx.c": "ada6b44da0115cd3185f56528d08bd43eacb9f468d5f7b4f143d92d8f45bf4e7",
     "USER/system_stm32f4xx.h": "50f5887a8d62d774e1bc3d0a2e8892dd43b5d200a2f6d9266f5b747d5810cb0f",
-    "USER/WHEELTEC.uvprojx": "3dbd16666720c528e3055e835e7cf7f1435625e70f7b7b6f864400f740471fd9"
+    "USER/WHEELTEC.uvprojx": "8b4438a4ab60ed99970ca9195d6dbc4c9e1145594a5066160a8dc7cfab4805fb"
   }
 }

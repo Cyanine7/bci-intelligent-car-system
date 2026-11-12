@@ -437,6 +437,17 @@ def test_task_navigation_and_offline_speed_design(fake_workbench, qapp, size):
     tabs = window.workspace_tabs
     assert [tabs.tabText(i) for i in range(tabs.count())] == ['实时监测', '速度环实验', '角速度环实验', '连续控制', '设备与调试']
     assert tabs.currentIndex() == 0
+    assert window.navigation.isVisible() == (size[0] >= 1240)
+    assert tabs.tabBar().isVisible() == (size[0] < 1240)
+    window.log_toggle.click()
+    assert not window.log_panel.isVisible()
+    window.log_toggle.click()
+    assert window.log_panel.isVisible()
+    samples = list(host.history.samples)
+    window.plot.setXRange(-10, -5, padding=0)
+    window.reset_plot_button.click()
+    assert window.plot.viewRange()[0] == pytest.approx([-60, 0])
+    assert list(host.history.samples) == samples
     assert window.connect_button.isVisible() and window.stop_button.isVisible()
     assert not window.kind_combo.isVisible() and not window.send_editor.isVisible()
     assert window.speed_panel is None
@@ -460,3 +471,8 @@ def test_task_navigation_and_offline_speed_design(fake_workbench, qapp, size):
     assert tabs.currentIndex() == 1 and window.speed_panel is panel
     assert panel.gain_boxes[0].value() == gain
     assert host.worker is None and host.scanner is None
+    window.navigation_buttons[0].click()
+    window.navigation_buttons[0].click()
+    assert tabs.currentIndex() == 0 and window.navigation_buttons[0].isChecked()
+    window.context_action.click()
+    assert tabs.currentIndex() == 4
